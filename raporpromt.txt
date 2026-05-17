@@ -1,0 +1,287 @@
+Aşağıdaki Python projesini analiz ederek yüksek lisans seviyesinde, akademik kurallara uygun, gerçek bir üniversite proje raporu hazırla:
+
+Proje Dosyası:
+
+* `bulanıktümkod.txt`
+
+Rapor başlığı:
+
+“Sosyal Ağlarda Yanlış Bilgi Riskinin Bulanık Mantık ile Modellenmesi”
+
+ÇOK ÖNEMLİ:
+Bu rapor sıradan bir özet olmayacak.
+Gerçek bir yüksek lisans ders proje raporu gibi hazırlanmalı.
+
+Raporda:
+
+* akademik dil kullanılmalı,
+* teknik açıklamalar detaylı olmalı,
+* metodoloji bölümleri bilimsel şekilde yazılmalı,
+* matematiksel açıklamalar yer almalı,
+* grafikler akademik biçimde açıklanmalı,
+* şekil ve tablo referansları kullanılmalı,
+* yorumlar bilimsel tartışma şeklinde yapılmalı.
+
+Rapor doğrudan Word (.docx) formatında oluşturulmalı.
+
+==================================================
+RAPOR UZUNLUĞU
+==============
+
+Minimum: 20 sayfa
+Hedef:Rapor ne kadar sürdüyse o kadar uzn olsun
+
+Boş içerik istemiyorum.
+Her bölüm detaylı yazılmalı.
+
+==================================================
+RAPOR BÖLÜMLERİ
+===============
+
+Aşağıdaki yapıyı eksiksiz uygula:
+
+1. Kapak Sayfası
+2. Özet (Abstract)
+3. İçindekiler
+4. Giriş
+5. Literatür Özeti
+6. Sistem Tasarımı
+7. Üyelik Fonksiyonları
+8. Kural Tabanı
+9. Çıkarım Mekanizması
+10. Deneysel Sonuçlar
+11. Duyarlılık Analizi
+12. Model Karşılaştırması
+13. Tartışma
+14. Sonuç
+15. Kaynakça
+
+==================================================
+GİRİŞ BÖLÜMÜ
+============
+
+Şunları detaylı açıkla:
+
+* Sosyal ağlarda yanlış bilgi problemi
+* Dezenformasyon ve misinformation farkı
+* Güven (trust) kavramının belirsizliği
+* Neden bulanık mantık kullanıldığı
+* Problemin klasik yöntemlerle çözülemeyen yönleri
+* Çalışmanın amacı
+* Çalışmanın katkıları
+
+==================================================
+LİTERATÜR ÖZETİ
+===============
+
+En az 10 akademik kaynak kullan.
+
+Şunlarla ilgili literatür anlat:
+
+* Fuzzy Logic
+* Mamdani FIS
+* Social Network Analysis
+* Trust Modeling
+* Misinformation Detection
+* Sentiment Analysis
+* Network Centrality
+* Explainable AI
+
+Kaynaklar:
+
+* IEEE
+* Springer
+* Elsevier
+* Google Scholar seviyesinde olmalı.
+
+APA formatında kaynakça oluştur.
+
+==================================================
+SİSTEM TASARIMI
+===============
+
+Şunları teknik detaylı açıkla:
+
+* Veri akışı
+* Mimari yapı
+* Kullanılan modüller
+* Veri ön işleme
+* Gerçek sosyal ağ grafı kullanımı
+* Sentetik veri üretimi
+* NetworkX kullanımı
+* Merkeziyet hesaplama
+
+Mutlaka:
+
+* sistem mimari diyagramı için yer bırak
+* şekil referansları kullan
+* tablolar oluştur
+
+==================================================
+ÜYELİK FONKSİYONLARI
+====================
+
+Aşağıdakileri akademik şekilde açıkla:
+
+* Triangular membership function
+* Trapezoidal membership function
+* Gaussian membership function
+
+Matematiksel formülleri yaz.
+
+Her değişken için:
+
+* güven skoru
+* paylaşım sıklığı
+* duygu değişimi
+* ağ merkeziyeti
+* risk seviyesi
+
+üyelik fonksiyonlarını ayrı ayrı açıkla.
+
+Şekil açıklamaları ekle:
+Örn:
+“Şekil 4.1’de güven skoru üyelik fonksiyonları gösterilmektedir.”
+
+==================================================
+KURAL TABANI
+============
+
+En az 15+ kuralı tablo halinde açıkla.
+
+Kuralları akademik yorumla değerlendir:
+Örn:
+“Düşük güven ve yüksek paylaşım sıklığı kombinasyonu yanlış bilgi yayılım riskini artırmaktadır.”
+
+Kural tablosu oluştur.
+
+==================================================
+ÇIKARIM MEKANİZMASI
+===================
+
+Detaylı anlat:
+
+* Mamdani inference
+* fuzzification
+* rule evaluation
+* aggregation
+* centroid defuzzification
+
+Centroid formülünü matematiksel olarak yaz.
+
+==================================================
+DENEYSEL SONUÇLAR
+=================
+
+Şunları detaylı yorumla:
+
+* 1000 örnek veri
+* risk dağılımı
+* histogramlar
+* surface plot
+* korelasyon analizi
+* örnek senaryolar
+* performans ölçümleri
+
+Grafiklerin yorumlarını akademik şekilde yap.
+
+==================================================
+DUYARLILIK ANALİZİ
+==================
+
+Şunları bilimsel şekilde analiz et:
+
+* güven arttıkça risk nasıl değişiyor
+* paylaşım sıklığı etkisi
+* duygu değişimi etkisi
+* merkeziyet etkisi
+
+Grafik referansları kullan.
+
+==================================================
+MODEL KARŞILAŞTIRMASI
+=====================
+
+Bulanık model ile klasik doğrusal trust modelini karşılaştır.
+
+Karşılaştır:
+
+* doğruluk
+* esneklik
+* yorumlanabilirlik
+* belirsizlik yönetimi
+
+Tablolar kullan.
+
+==================================================
+TARTIŞMA
+========
+
+Akademik şekilde:
+
+* modelin güçlü yönleri
+* zayıf yönleri
+* sınırlamalar
+* gelecekteki çalışmalar
+
+anlatılmalı.
+
+==================================================
+SONUÇ
+=====
+
+Çalışmanın:
+
+* katkıları
+* başarıları
+* akademik değeri
+* gerçek dünya uygulanabilirliği
+
+bilimsel dille özetlenmeli.
+
+==================================================
+WORD DOSYASI İSTEKLERİ
+======================
+
+Word dosyası:
+
+* profesyonel görünmeli
+* başlık stilleri kullanılmalı
+* otomatik içindekiler olmalı
+* şekil numaraları olmalı
+* tablo numaraları olmalı
+* sayfa numarası olmalı
+* Times New Roman 12 pt
+* 1.5 satır aralığı
+* akademik formatta hazırlanmalı
+
+==================================================
+GRAFİKLER VE GÖRSELLER
+======================
+
+Ben ayrıca görseller vereceğim.
+
+Rapor içinde:
+
+Verdiğim resimleri gerekli olan yerlere doğdu bir 
+şekilde yerleştir
+
+==================================================
+TESLİM
+======
+
+Çıktı olarak:
+
+1. Tam Word raporu (.docx)
+2. APA kaynakça
+3. Şekil ve tablo referansları
+4. Akademik formatlama
+5. Gerçek proje raporu kalitesinde içerik
+
+oluştur.
+
+Eksik bölüm bırakma.
+Yarım açıklama bırakma.
+Maddeler halinde kısa özet istemiyorum.
+
+Tam akademik proje raporu üret.

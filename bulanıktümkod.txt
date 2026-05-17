@@ -1,0 +1,3987 @@
+# -*- coding: utf-8 -*-
+"""
+Model Karsilastirma Modulu
+============================
+Bulanik mantik sistemi ile temel dogrusal modeli karsilastirir.
+"""
+
+import sys
+import numpy as np
+import pandas as pd
+import os
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+from fuzzy_system.inference import BulanikCikarimSistemi
+from models.baseline import TemelModel, modelleri_karsilastir
+from utils.data_loader import islenmis_veri_yukle, veriyi_kaydet, ISENMIS_VERI_DIZINI
+from visualization.plots import karsilastirma_grafikleri, CIKTI_DIZINI
+
+
+def karsilastirma_deneyi_calistir(df=None, fonksiyon_tipi='karisik', kaydet_dizini=None):
+    """Tam karsilastirma deneyini calistirir."""
+    if kaydet_dizini is None:
+        kaydet_dizini = CIKTI_DIZINI
+    
+    os.makedirs(kaydet_dizini, exist_ok=True)
+    
+    print("\n" + "#" * 60)
+    print("     MODEL KARSILASTIRMA DENEYI")
+    print("#" * 60)
+    
+    # Veri yukle
+    if df is None:
+        try:
+            df = islenmis_veri_yukle("simulasyon_sonuclari.csv")
+        except FileNotFoundError:
+            df = islenmis_veri_yukle("sentetik_veri.csv")
+    
+    # MODEL 1: Bulanik Mantik Sistemi
+    print("\n-- MODEL 1: Bulanik Mantik Sistemi --")
+    fis = BulanikCikarimSistemi(fonksiyon_tipi)
+    
+    if 'risk_seviyesi' in df.columns:
+        bulanik_riskler = df['risk_seviyesi'].values
+        print(f"[KARSILASTIRMA] Mevcut risk degerleri kullaniliyor ({len(bulanik_riskler)} ornek)")
+    else:
+        bulanik_riskler = fis.toplu_hesapla(df)
+    
+    # MODEL 2: Temel Dogrusal Model
+    print("\n-- MODEL 2: Temel Dogrusal Model --")
+    temel_model = TemelModel()
+    temel_riskler = temel_model.toplu_tahmin(df)
+    
+    # KARSILASTIRMA
+    print("\n-- KARSILASTIRMA ANALIZI --")
+    metrikler = modelleri_karsilastir(bulanik_riskler, temel_riskler)
+    
+    karsilastirma_df = pd.DataFrame({
+        'guven_skoru': df['guven_skoru'],
+        'paylasim_sikligi': df['paylasim_sikligi'],
+        'duygu_sapmasi': df['duygu_sapmasi'],
+        'merkezlilik_skoru': df['merkezlilik_skoru'],
+        'bulanik_risk': np.round(bulanik_riskler, 4),
+        'temel_risk': np.round(temel_riskler, 4),
+        'fark': np.round(bulanik_riskler - temel_riskler, 4),
+        'mutlak_fark': np.round(np.abs(bulanik_riskler - temel_riskler), 4)
+    })
+    
+    veriyi_kaydet(karsilastirma_df, "karsilastirma_sonuclari.csv")
+    
+    karsilastirma_grafikleri(
+        bulanik_riskler, temel_riskler, metrikler,
+        kaydet_yolu=os.path.join(kaydet_dizini, "08_model_karsilastirma.png")
+    )
+    
+    # Ozet
+    print("\n" + "=" * 60)
+    print("KARSILASTIRMA OZETI")
+    print("=" * 60)
+    print(f"\n  Bulanik Model:")
+    print(f"    Ortalama risk : {bulanik_riskler.mean():.4f}")
+    print(f"    Std sapma     : {bulanik_riskler.std():.4f}")
+    print(f"\n  Temel Model:")
+    print(f"    Ortalama risk : {temel_riskler.mean():.4f}")
+    print(f"    Std sapma     : {temel_riskler.std():.4f}")
+    print(f"\n  Farklar:")
+    print(f"    Ort. mutlak fark : {karsilastirma_df['mutlak_fark'].mean():.4f}")
+    print(f"    Maks. fark       : {karsilastirma_df['mutlak_fark'].max():.4f}")
+    print("=" * 60)
+    
+    sonuclar = {
+        'bulanik_riskler': bulanik_riskler,
+        'temel_riskler': temel_riskler,
+        'metrikler': metrikler,
+        'karsilastirma_df': karsilastirma_df,
+        'fis': fis
+    }
+    
+    return sonuclar
+
+
+if __name__ == "__main__":
+    sonuclar = karsilastirma_deneyi_calistir()
+    print("\n[TEST] Karsilastirma modulu basariyla calisti!")
+# -*- coding: utf-8 -*-
+"""
+Duyarlilik Analizi Modulu
+==========================
+Her giris degiskeninin risk ciktisi uzerindeki etkisini analiz eder.
+"""
+
+import sys
+import numpy as np
+import pandas as pd
+import os
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+from fuzzy_system.inference import BulanikCikarimSistemi
+from visualization.plots import duyarlilik_grafikleri, CIKTI_DIZINI
+
+
+def tek_degisken_duyarliligi(fis, degisken='guven', aralik=None, 
+                              n_nokta=100, sabit_degerler=None):
+    """Tek bir degiskenin etkisini analiz eder."""
+    if sabit_degerler is None:
+        sabit_degerler = {
+            'guven': 0.5, 'paylasim': 20,
+            'duygu': 0.3, 'merkezlilik': 0.5
+        }
+    
+    varsayilan_araliklar = {
+        'guven': (0, 1),
+        'paylasim': (0, 50),
+        'duygu': (-1, 1),
+        'merkezlilik': (0, 1)
+    }
+    
+    if aralik is None:
+        aralik = varsayilan_araliklar[degisken]
+    
+    x_degerleri = np.linspace(aralik[0], aralik[1], n_nokta)
+    risk_degerleri = []
+    
+    for x in x_degerleri:
+        degerler = sabit_degerler.copy()
+        degerler[degisken] = x
+        
+        risk = fis.hesapla(
+            guven=degerler['guven'],
+            paylasim=degerler['paylasim'],
+            duygu=degerler['duygu'],
+            merkezlilik=degerler['merkezlilik']
+        )
+        risk_degerleri.append(risk)
+    
+    df = pd.DataFrame({
+        degisken: x_degerleri,
+        'risk': risk_degerleri
+    })
+    
+    return df
+
+
+def coklu_duyarlilik_analizi(fis, n_nokta=50):
+    """Tum degisken ciftleri icin duyarlilik analizi yapar."""
+    print("\n[DUYARLILIK] Coklu duyarlilik analizi basliyor...")
+    
+    degiskenler = ['guven', 'paylasim', 'duygu', 'merkezlilik']
+    araliklar = {
+        'guven': (0, 1),
+        'paylasim': (0, 50),
+        'duygu': (-1, 1),
+        'merkezlilik': (0, 1)
+    }
+    sabit = {'guven': 0.5, 'paylasim': 20, 'duygu': 0.3, 'merkezlilik': 0.5}
+    
+    sonuclar = {}
+    
+    for i, d1 in enumerate(degiskenler):
+        for j, d2 in enumerate(degiskenler):
+            if j <= i:
+                continue
+            
+            print(f"  Analiz: {d1} vs {d2}...")
+            x = np.linspace(araliklar[d1][0], araliklar[d1][1], n_nokta)
+            y = np.linspace(araliklar[d2][0], araliklar[d2][1], n_nokta)
+            Z = np.zeros((n_nokta, n_nokta))
+            
+            for xi in range(n_nokta):
+                for yi in range(n_nokta):
+                    degerler = sabit.copy()
+                    degerler[d1] = x[xi]
+                    degerler[d2] = y[yi]
+                    
+                    Z[yi, xi] = fis.hesapla(
+                        guven=degerler['guven'],
+                        paylasim=degerler['paylasim'],
+                        duygu=degerler['duygu'],
+                        merkezlilik=degerler['merkezlilik']
+                    )
+            
+            sonuclar[f'{d1}_vs_{d2}'] = {
+                'x': x, 'y': y, 'Z': Z,
+                'd1': d1, 'd2': d2
+            }
+    
+    print(f"[DUYARLILIK] Coklu analiz tamamlandi: {len(sonuclar)} cift")
+    return sonuclar
+
+
+def duyarlilik_raporu(fis, kaydet_dizini=None):
+    """Tam duyarlilik analizi raporu uretir."""
+    if kaydet_dizini is None:
+        kaydet_dizini = CIKTI_DIZINI
+    
+    os.makedirs(kaydet_dizini, exist_ok=True)
+    
+    print("\n" + "=" * 60)
+    print("DUYARLILIK ANALIZI RAPORU")
+    print("=" * 60)
+    
+    rapor = {}
+    
+    degiskenler = {
+        'guven': 'Guven Skoru',
+        'paylasim': 'Paylasim Sikligi',
+        'duygu': 'Duygu Sapmasi',
+        'merkezlilik': 'Merkezlilik Skoru'
+    }
+    
+    print("\n Tek Degisken Duyarliliklari:")
+    print("-" * 40)
+    
+    for deg, isim in degiskenler.items():
+        df = tek_degisken_duyarliligi(fis, deg)
+        rapor[deg] = df
+        
+        risk_min = df['risk'].min()
+        risk_max = df['risk'].max()
+        risk_aralik = risk_max - risk_min
+        
+        korelasyon = np.corrcoef(df[deg], df['risk'])[0, 1]
+        yon = '+' if korelasyon > 0.1 else ('-' if korelasyon < -0.1 else '=')
+        
+        print(f"\n  {isim}:")
+        print(f"    Risk araligi : [{risk_min:.4f}, {risk_max:.4f}]")
+        print(f"    Risk degisimi: {risk_aralik:.4f}")
+        print(f"    Korelasyon   : {korelasyon:+.4f} ({yon})")
+        
+        if abs(korelasyon) > 0.5:
+            etki = "GUCLU"
+        elif abs(korelasyon) > 0.2:
+            etki = "ORTA"
+        else:
+            etki = "ZAYIF"
+        print(f"    Etki duzeyi  : {etki}")
+    
+    duyarlilik_grafikleri(
+        fis,
+        kaydet_yolu=os.path.join(kaydet_dizini, "07_duyarlilik_analizi.png")
+    )
+    
+    print("\n" + "=" * 60)
+    print("DUYARLILIK ANALIZI TAMAMLANDI")
+    print("=" * 60)
+    
+    return rapor
+
+
+if __name__ == "__main__":
+    fis = BulanikCikarimSistemi('karisik')
+    rapor = duyarlilik_raporu(fis)
+    print("\n[TEST] Duyarlilik analizi modulu basariyla calisti!")
+# -*- coding: utf-8 -*-
+"""
+Simulasyon Modulu
+==================
+Bulanik cikarim sistemini buyuk olcekli veri uzerinde calistirir.
+Gercek graf verisini sentetik verilerle birlestirerek 
+risk tahminleri uretir.
+"""
+
+import os
+import sys
+import numpy as np
+import pandas as pd
+import time
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+from fuzzy_system.inference import BulanikCikarimSistemi
+from utils.preprocessing import tam_veri_hatti_calistir
+from utils.data_loader import veriyi_kaydet, ISENMIS_VERI_DIZINI, dizinleri_olustur
+
+
+def simulasyon_calistir(ornek_sayisi=1000, fonksiyon_tipi='karisik', 
+                        graf_entegre=True, rastgele_tohum=42):
+    """
+    Tam simulasyonu calistirir.
+    """
+    print("\n" + "#" * 60)
+    print("     SIMULASYON MOTORU BASLATILIYOR")
+    print("#" * 60)
+    
+    baslangic = time.time()
+    dizinleri_olustur()
+    
+    # ADIM 1: Veri Hazirlama
+    print("\n-- ADIM 1: Veri Hazirlama --")
+    df = tam_veri_hatti_calistir(
+        ornek_sayisi=ornek_sayisi,
+        graf_entegre=graf_entegre,
+        rastgele_tohum=rastgele_tohum
+    )
+    
+    # ADIM 2: Bulanik Sistem Kurulumu
+    print("\n-- ADIM 2: Bulanik Sistem Kurulumu --")
+    fis = BulanikCikarimSistemi(fonksiyon_tipi)
+    
+    # ADIM 3: Risk Hesaplama
+    print("\n-- ADIM 3: Risk Hesaplama --")
+    riskler = fis.toplu_hesapla(df)
+    
+    df['risk_seviyesi'] = np.round(riskler, 4)
+    
+    df['risk_kategorisi'] = pd.cut(
+        df['risk_seviyesi'],
+        bins=[0, 0.35, 0.65, 1.0],
+        labels=['Dusuk', 'Orta', 'Yuksek'],
+        include_lowest=True
+    )
+    
+    # ADIM 4: Sonuclari Kaydet
+    print("\n-- ADIM 4: Sonuclari Kaydetme --")
+    veriyi_kaydet(df, "simulasyon_sonuclari.csv")
+    
+    # ADIM 5: Ozet Rapor
+    sure = time.time() - baslangic
+    
+    print("\n" + "=" * 60)
+    print("     SIMULASYON SONUC RAPORU")
+    print("=" * 60)
+    print(f"\n  Toplam ornek sayisi    : {len(df)}")
+    print(f"  Calisma suresi         : {sure:.1f} saniye")
+    print(f"  Uyelik fonksiyonu tipi : {fonksiyon_tipi}")
+    print(f"  Graf entegrasyonu     : {'Evet' if graf_entegre else 'Hayir'}")
+    
+    print(f"\n  Risk Istatistikleri:")
+    print(f"  ---------------------")
+    print(f"  Minimum risk  : {riskler.min():.4f}")
+    print(f"  Maksimum risk : {riskler.max():.4f}")
+    print(f"  Ortalama risk : {riskler.mean():.4f}")
+    print(f"  Std sapma     : {riskler.std():.4f}")
+    print(f"  Medyan risk   : {np.median(riskler):.4f}")
+    
+    print(f"\n  Risk Dagilimi:")
+    print(f"  ---------------")
+    kategori_sayilari = df['risk_kategorisi'].value_counts()
+    for kat in ['Dusuk', 'Orta', 'Yuksek']:
+        sayi = kategori_sayilari.get(kat, 0)
+        oran = sayi / len(df) * 100
+        bar = '#' * int(oran / 2)
+        print(f"  {kat:7s}: {sayi:4d} ({oran:5.1f}%) {bar}")
+    
+    print("\n" + "#" * 60)
+    print("     SIMULASYON TAMAMLANDI")
+    print("#" * 60 + "\n")
+    
+    return df, fis
+
+
+def senaryo_testleri(fis):
+    """
+    Onceden tanimlanmis senaryolar uzerinde test calistirir.
+    """
+    print("\n" + "=" * 60)
+    print("SENARYO TESTLERI")
+    print("=" * 60)
+    
+    senaryolar = [
+        {'ad': 'Guvenilir Akademisyen', 'guven': 0.95, 'paylasim': 3, 'duygu': 0.05, 'merkezlilik': 0.3},
+        {'ad': 'Aktif Haber Kaynagi', 'guven': 0.8, 'paylasim': 40, 'duygu': 0.2, 'merkezlilik': 0.9},
+        {'ad': 'Supheli Bot Hesap', 'guven': 0.05, 'paylasim': 48, 'duygu': 0.9, 'merkezlilik': 0.4},
+        {'ad': 'Duygusal Aktivist', 'guven': 0.4, 'paylasim': 25, 'duygu': 0.85, 'merkezlilik': 0.6},
+        {'ad': 'Sessiz Gozlemci', 'guven': 0.6, 'paylasim': 1, 'duygu': 0.1, 'merkezlilik': 0.15},
+        {'ad': 'Etkileyici Trol', 'guven': 0.1, 'paylasim': 35, 'duygu': 0.75, 'merkezlilik': 0.85},
+        {'ad': 'Ortalama Kullanici', 'guven': 0.5, 'paylasim': 10, 'duygu': 0.3, 'merkezlilik': 0.5},
+        {'ad': 'Yasli Kullanici', 'guven': 0.7, 'paylasim': 2, 'duygu': 0.15, 'merkezlilik': 0.2},
+        {'ad': 'Viral Icerik Uretici', 'guven': 0.3, 'paylasim': 45, 'duygu': 0.6, 'merkezlilik': 0.75},
+        {'ad': 'Komplo Teorisyeni', 'guven': 0.1, 'paylasim': 30, 'duygu': 0.95, 'merkezlilik': 0.5},
+    ]
+    
+    sonuclar = []
+    for s in senaryolar:
+        risk = fis.hesapla(s['guven'], s['paylasim'], s['duygu'], s['merkezlilik'])
+        
+        if risk < 0.35:
+            kategori = '[DUSUK]'
+        elif risk < 0.65:
+            kategori = '[ORTA]'
+        else:
+            kategori = '[YUKSEK]'
+        
+        sonuclar.append({
+            'Senaryo': s['ad'],
+            'Guven': s['guven'],
+            'Paylasim': s['paylasim'],
+            'Duygu': s['duygu'],
+            'Merkezlilik': s['merkezlilik'],
+            'Risk': round(risk, 4),
+            'Kategori': kategori
+        })
+        
+        print(f"  {s['ad']:25s}: Risk = {risk:.4f} {kategori}")
+    
+    df_sonuclar = pd.DataFrame(sonuclar)
+    print("\n" + "=" * 60)
+    
+    return df_sonuclar
+
+
+if __name__ == "__main__":
+    df_sonuclar, fis = simulasyon_calistir(ornek_sayisi=1000)
+    senaryo_testleri(fis)
+    print("\n[TEST] Simulasyon modulu basariyla calisti!")
+# -*- coding: utf-8 -*-
+"""
+Bulanik Cikarim Motoru
+========================
+Mamdani tipi bulanik cikarim sistemini kurar ve calistirir.
+
+Mamdani Yontemi Adimlari
+------------------------
+1. Bulaniklastirma (Fuzzification):
+   Kesin giris degerlerini uyelik derecelerine donusturur.
+
+2. Kural Degerlendirme (Rule Evaluation):
+   VE (AND) -> min operatoru
+   VEYA (OR) -> max operatoru
+
+3. Toplama (Aggregation):
+   Tum kurallarin cikti uyelik fonksiyonlari birlestirilir.
+   mu_agg(z) = max(mu_1(z), mu_2(z), ..., mu_n(z))
+
+4. Durulastirma (Defuzzification):
+   Centroid (agirlik merkezi) yontemi:
+   z* = integral z * mu_agg(z) dz / integral mu_agg(z) dz
+"""
+
+import sys
+import numpy as np
+import pandas as pd
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+import warnings
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+from fuzzy_system.membership import degiskenleri_olustur, uyelik_fonksiyonlarini_tanimla
+from fuzzy_system.rules import kurallari_olustur
+
+
+class BulanikCikarimSistemi:
+    """
+    Mamdani tipi Bulanik Cikarim Sistemi (Fuzzy Inference System - FIS).
+    
+    Sosyal ag kullanicilarinin yanlis bilgi yayma riskini tahmin eder.
+    
+    Kullanim
+    --------
+    >>> fis = BulanikCikarimSistemi()
+    >>> risk = fis.hesapla(guven=0.3, paylasim=30, duygu=0.7, merkezlilik=0.8)
+    >>> print(f"Risk: {risk:.4f}")
+    """
+    
+    def __init__(self, fonksiyon_tipi='karisik', aktif_girdiler=None):
+        """
+        Bulanik cikarim sistemini baslatir.
+        
+        Parametreler
+        ------------
+        fonksiyon_tipi : str
+            Uyelik fonksiyonu tipi: 'ucgensel', 'yamuksal', veya 'karisik'.
+        aktif_girdiler : list, opsiyonel
+            Baslangicta aktif olan degiskenlerin listesi. Eger None ise
+            tum 4 degisken aktif kabul edilir.
+        """
+        self.fonksiyon_tipi = fonksiyon_tipi
+        if aktif_girdiler is None:
+            self.aktif_girdiler = ['guven', 'paylasim', 'duygu', 'merkezlilik']
+        else:
+            self.aktif_girdiler = aktif_girdiler
+            
+        self._sistem_kur()
+        
+    def aktif_girdileri_ayarla(self, aktif_liste):
+        """
+        Hesaplamalara dahil edilecek degiskenleri secer ve kontrol sistemini 
+        buna gore dinamik olarak yeniden derler.
+        """
+        if not aktif_liste:
+            warnings.warn("En az 1 girdi secilmelidir. Varsayilan tum girdiler kullanilacak.")
+            self.aktif_girdiler = ['guven', 'paylasim', 'duygu', 'merkezlilik']
+        else:
+            self.aktif_girdiler = aktif_liste
+            
+        self._sistem_kur()
+    
+    def _sistem_kur(self):
+        """Bulanik sistemi kurar."""
+        print(f"[FIS] Bulanik cikarim sistemi kuruluyor (tip: {self.fonksiyon_tipi})...")
+        
+        # 1. Degiskenleri olustur
+        self.degiskenler = degiskenleri_olustur()
+        
+        # 2. Uyelik fonksiyonlarini tanimla
+        self.degiskenler = uyelik_fonksiyonlarini_tanimla(
+            self.degiskenler, self.fonksiyon_tipi
+        )
+        
+        # 3. Kurallari olustur (aktif olanlari dinamik on-the-fly kirparak)
+        self.kurallar, self.kural_aciklamalari = kurallari_olustur(
+            self.degiskenler, 
+            aktif_degiskenler=self.aktif_girdiler
+        )
+        
+        # 4. Kontrol sistemi olustur
+        if len(self.kurallar) > 0:
+            self.kontrol_sistemi = ctrl.ControlSystem(self.kurallar)
+        else:
+            self.kontrol_sistemi = None
+            print("[FIS] Uyari: Secilen girdilerle aktif kalan hic kural yok!")
+        
+        print(f"[FIS] Sistem hazir: {len(self.kurallar)} kural, "
+              f"tip: {self.fonksiyon_tipi}")
+    
+    def hesapla(self, guven, paylasim, duygu, merkezlilik):
+        """
+        Tek bir giris seti icin risk seviyesini hesaplar.
+        
+        Parametreler
+        ------------
+        guven : float - Guven skoru [0, 1].
+        paylasim : float - Paylasim sikligi [0, 50].
+        duygu : float - Duygu sapmasi [-1, +1].
+        merkezlilik : float - Merkezlilik skoru [0, 1].
+        
+        Dondurur
+        --------
+        risk : float - Hesaplanan risk seviyesi [0, 1].
+        """
+        try:
+            if self.kontrol_sistemi is None:
+                return 0.5  # Gecerli kural olmadiginda varsayilan deger
+                
+            # Her hesaplamada yeni simulasyon olustur (state reset sorunu icin)
+            sim = ctrl.ControlSystemSimulation(self.kontrol_sistemi)
+            
+            if 'guven' in self.aktif_girdiler:
+                sim.input['guven_skoru'] = np.clip(float(guven), 0.001, 0.999)
+                
+            if 'paylasim' in self.aktif_girdiler:
+                sim.input['paylasim_sikligi'] = np.clip(float(paylasim), 0.1, 49.9)
+                
+            if 'duygu' in self.aktif_girdiler:
+                sim.input['duygu_sapmasi'] = np.clip(float(duygu), -0.999, 0.999)
+                
+            if 'merkezlilik' in self.aktif_girdiler:
+                sim.input['merkezlilik_skoru'] = np.clip(float(merkezlilik), 0.001, 0.999)
+            
+            sim.compute()
+            
+            risk = sim.output['risk_seviyesi']
+            return np.clip(risk, 0, 1)
+            
+        except Exception as e:
+            warnings.warn(f"Bulanik cikarim hatasi (g={guven}, p={paylasim}, "
+                         f"d={duygu}, m={merkezlilik}): {e}")
+            return 0.5
+    
+    def toplu_hesapla(self, df):
+        """
+        DataFrame uzerinde toplu risk hesaplamasi yapar.
+        """
+        print(f"[FIS] Toplu hesaplama basliyor: {len(df)} ornek...")
+        
+        riskler = np.zeros(len(df))
+        basarili = 0
+        hatali = 0
+        
+        for i in range(len(df)):
+            satir = df.iloc[i]
+            risk = self.hesapla(
+                guven=satir['guven_skoru'],
+                paylasim=satir['paylasim_sikligi'],
+                duygu=satir['duygu_sapmasi'],
+                merkezlilik=satir['merkezlilik_skoru']
+            )
+            riskler[i] = risk
+            
+            if risk != 0.5:
+                basarili += 1
+            else:
+                hatali += 1
+            
+            if (i + 1) % 200 == 0 or (i + 1) == len(df):
+                print(f"       Ilerleme: {i+1}/{len(df)} "
+                      f"({(i+1)/len(df)*100:.1f}%)")
+        
+        print(f"[FIS] Toplu hesaplama tamamlandi: "
+              f"{basarili} basarili, {hatali} hatali")
+        print(f"       Risk araligi: [{riskler.min():.4f}, {riskler.max():.4f}]")
+        print(f"       Ortalama risk: {riskler.mean():.4f}")
+        
+        return riskler
+    
+    def kural_ateslemelerini_al(self, guven, paylasim, duygu, merkezlilik):
+        """
+        Verilen girisler icin aktif her degiskenin uyelik derecelerini hesaplar.
+        """
+        g = self.degiskenler['guven']
+        p = self.degiskenler['paylasim']
+        d = self.degiskenler['duygu']
+        m = self.degiskenler['merkezlilik']
+        
+        uyelikler = {}
+        
+        if 'guven' in self.aktif_girdiler:
+            uyelikler['guven'] = {}
+            for terim in g.terms:
+                uyelikler['guven'][terim] = float(fuzz.interp_membership(
+                    g.universe, g[terim].mf, guven))
+        
+        if 'paylasim' in self.aktif_girdiler:
+            uyelikler['paylasim'] = {}
+            for terim in p.terms:
+                uyelikler['paylasim'][terim] = float(fuzz.interp_membership(
+                    p.universe, p[terim].mf, paylasim))
+        
+        if 'duygu' in self.aktif_girdiler:
+            uyelikler['duygu'] = {}
+            for terim in d.terms:
+                uyelikler['duygu'][terim] = float(fuzz.interp_membership(
+                    d.universe, d[terim].mf, duygu))
+        
+        if 'merkezlilik' in self.aktif_girdiler:
+            uyelikler['merkezlilik'] = {}
+            for terim in m.terms:
+                uyelikler['merkezlilik'][terim] = float(fuzz.interp_membership(
+                    m.universe, m[terim].mf, merkezlilik))
+        
+        return uyelikler
+    
+    def ara_sonuclari_al(self, guven, paylasim, duygu, merkezlilik):
+        """
+        Adim adim cikarim ara sonuclarini dondurur.
+        Aciklanabilir AI modu icin kullanilir.
+        """
+        risk = self.hesapla(guven, paylasim, duygu, merkezlilik)
+        uyelikler = self.kural_ateslemelerini_al(guven, paylasim, duygu, merkezlilik)
+        
+        if risk < 0.35:
+            kategori = 'DUSUK'
+            renk = '[DUSUK]'
+        elif risk < 0.65:
+            kategori = 'ORTA'
+            renk = '[ORTA]'
+        else:
+            kategori = 'YUKSEK'
+            renk = '[YUKSEK]'
+        
+        sonuclar = {
+            'girisler': {
+                'guven_skoru': guven,
+                'paylasim_sikligi': paylasim,
+                'duygu_sapmasi': duygu,
+                'merkezlilik_skoru': merkezlilik
+            },
+            'uyelik_dereceleri': uyelikler,
+            'risk_skoru': risk,
+            'risk_kategorisi': kategori,
+            'risk_renk': renk,
+            'kural_aciklamalari': self.kural_aciklamalari
+        }
+        
+        return sonuclar
+    
+    def adim_adim_goster(self, guven, paylasim, duygu, merkezlilik):
+        """
+        Cikarim surecini adim adim konsola yazdirir.
+        """
+        sonuclar = self.ara_sonuclari_al(guven, paylasim, duygu, merkezlilik)
+        
+        print("\n" + "=" * 70)
+        print("     BULANIK CIKARIM SURECI - ADIM ADIM GOSTERIM")
+        print("=" * 70)
+        
+        # Adim 1: Girisler
+        print("\n ADIM 1: GIRIS DEGERLERI")
+        print("-" * 40)
+        g = sonuclar['girisler']
+        if 'guven' in self.aktif_girdiler:
+            print(f"  Guven Skoru      : {g['guven_skoru']:.4f}")
+        if 'paylasim' in self.aktif_girdiler:
+            print(f"  Paylasim Sikligi : {g['paylasim_sikligi']:.1f} gonderi/gun")
+        if 'duygu' in self.aktif_girdiler:
+            print(f"  Duygu Sapmasi    : {g['duygu_sapmasi']:.4f}")
+        if 'merkezlilik' in self.aktif_girdiler:
+            print(f"  Merkezlilik Skoru : {g['merkezlilik_skoru']:.4f}")
+        
+        # Adim 2: Bulaniklastirma
+        print("\n ADIM 2: BULANIKLASTIRMA (Fuzzification)")
+        print("-" * 40)
+        
+        turkce_terimler = {
+            'dusuk': 'Dusuk', 'orta': 'Orta', 'yuksek': 'Yuksek',
+            'kararli': 'Kararli', 'degisken': 'Degisken'
+        }
+        turkce_degiskenler = {
+            'guven': 'Guven', 'paylasim': 'Paylasim',
+            'duygu': 'Duygu', 'merkezlilik': 'Merkezlilik'
+        }
+        
+        for deg_adi, terimler in sonuclar['uyelik_dereceleri'].items():
+            deg_turkce = turkce_degiskenler.get(deg_adi, deg_adi)
+            print(f"\n  {deg_turkce}:")
+            for terim, derece in terimler.items():
+                terim_turkce = turkce_terimler.get(terim, terim)
+                bar = '#' * int(derece * 20) + '.' * (20 - int(derece * 20))
+                print(f"    {terim_turkce:10s}: mu = {derece:.4f} |{bar}|")
+        
+        # Adim 3
+        print("\n ADIM 3: KURAL DEGERLENDIRME")
+        print("-" * 40)
+        print(f"  Toplam kural sayisi: {len(self.kurallar)}")
+        print(f"  VE (AND) operatoru : min")
+        print(f"  VEYA (OR) operatoru: max")
+        
+        # Adim 4
+        print("\n ADIM 4: TOPLAMA (Aggregation)")
+        print("-" * 40)
+        print(f"  Yontem: Maksimum (max)")
+        
+        # Adim 5
+        print("\n ADIM 5: DURULASTIRMA (Defuzzification)")
+        print("-" * 40)
+        print(f"  Yontem: Agirlik Merkezi (Centroid)")
+        print(f"  z* = integral z * mu_agg(z) dz / integral mu_agg(z) dz")
+        
+        # Sonuc
+        risk = sonuclar['risk_skoru']
+        kat = sonuclar['risk_kategorisi']
+        renk = sonuclar['risk_renk']
+        
+        print("\n" + "=" * 70)
+        print(f"  {renk} SONUC: Risk Seviyesi = {risk:.4f} ({kat})")
+        print("=" * 70 + "\n")
+        
+        return sonuclar
+
+
+def sistemi_olustur(fonksiyon_tipi='karisik'):
+    """Bulanik cikarim sistemi fabrika fonksiyonu."""
+    return BulanikCikarimSistemi(fonksiyon_tipi)
+
+
+if __name__ == "__main__":
+    fis = BulanikCikarimSistemi('karisik')
+    
+    print("\n--- Tek Hesaplama Testi ---")
+    test_senaryolari = [
+        (0.2, 35, 0.8, 0.9, "Yuksek Riskli Profil"),
+        (0.9, 5, 0.1, 0.2, "Dusuk Riskli Profil"),
+        (0.5, 20, 0.4, 0.5, "Orta Riskli Profil"),
+        (0.1, 45, 0.9, 0.8, "Maksimum Riskli Profil"),
+        (0.95, 2, 0.05, 0.1, "Minimum Riskli Profil"),
+    ]
+    
+    for guven, paylasim, duygu, merkezlilik, aciklama in test_senaryolari:
+        risk = fis.hesapla(guven, paylasim, duygu, merkezlilik)
+        kat = 'DUSUK' if risk < 0.35 else ('ORTA' if risk < 0.65 else 'YUKSEK')
+        print(f"  {aciklama:25s}: g={guven:.2f} p={paylasim:2.0f} "
+              f"d={duygu:.2f} m={merkezlilik:.2f} -> Risk={risk:.4f} ({kat})")
+    
+    print("\n--- Adim Adim Gosterim ---")
+    fis.adim_adim_goster(guven=0.2, paylasim=35, duygu=0.8, merkezlilik=0.9)
+    
+    print("\n[TEST] Bulanik cikarim motoru basariyla calisti!")
+# -*- coding: utf-8 -*-
+"""
+Üyelik Fonksiyonları Modülü
+============================
+Bulanık mantık sistemi için üyelik fonksiyonlarını tanımlar.
+Her giriş/çıkış değişkeni için üçgensel (trimf) ve yamuksal (trapmf) 
+üyelik fonksiyonları kullanılır.
+
+Değişkenler
+-----------
+1. Güven Skoru (Trust Score) ∈ [0, 1]
+   - Düşük, Orta, Yüksek
+2. Paylaşım Sıklığı (Posting Frequency) ∈ [0, 50]
+   - Düşük, Orta, Yüksek
+3. Duygu Sapması (Sentiment Deviation) ∈ [-1, +1]
+   - Kararlı (Stable), Orta (Moderate), Değişken (Volatile)
+4. Merkezlilik Skoru (Centrality Score) ∈ [0, 1]
+   - Düşük, Orta, Yüksek
+5. Risk Seviyesi (Risk Level) ∈ [0, 1]
+   - Düşük, Orta, Yüksek
+
+Üyelik Fonksiyon Türleri
+-------------------------
+- Üçgensel (Triangular - trimf): 3 parametre [a, b, c]
+  μ(x) = max(min((x-a)/(b-a), (c-x)/(c-b)), 0)
+  
+- Yamuksal (Trapezoidal - trapmf): 4 parametre [a, b, c, d]
+  μ(x) = max(min((x-a)/(b-a), 1, (d-x)/(d-c)), 0)
+"""
+
+import numpy as np
+import skfuzzy as fuzz
+from skfuzzy import control as ctrl
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')
+
+
+def degiskenleri_olustur():
+    """
+    Bulanık sistem için giriş ve çıkış değişkenlerini oluşturur.
+    
+    Döndürür
+    --------
+    degiskenler : dict
+        'guven', 'paylasim', 'duygu', 'merkezlilik', 'risk' anahtarlarıyla
+        Antecedent/Consequent nesneleri.
+    """
+    # Evrensel kümeler (Universe of Discourse)
+    guven = ctrl.Antecedent(np.linspace(0, 1, 1001), 'guven_skoru')
+    paylasim = ctrl.Antecedent(np.linspace(0, 50, 1001), 'paylasim_sikligi')
+    duygu = ctrl.Antecedent(np.linspace(-1, 1, 1001), 'duygu_sapmasi')
+    merkezlilik = ctrl.Antecedent(np.linspace(0, 1, 1001), 'merkezlilik_skoru')
+    risk = ctrl.Consequent(np.linspace(0, 1, 1001), 'risk_seviyesi')
+    
+    return {
+        'guven': guven,
+        'paylasim': paylasim,
+        'duygu': duygu,
+        'merkezlilik': merkezlilik,
+        'risk': risk
+    }
+
+
+def uyelik_fonksiyonlarini_tanimla(degiskenler, fonksiyon_tipi='karisik'):
+    """
+    Tüm değişkenler için üyelik fonksiyonlarını tanımlar.
+    
+    Parametreler
+    ------------
+    degiskenler : dict
+        degiskenleri_olustur() fonksiyonundan dönen sözlük.
+    fonksiyon_tipi : str
+        'ucgensel' (trimf), 'yamuksal' (trapmf), veya 'karisik' (ikisinin karışımı).
+    
+    Döndürür
+    --------
+    degiskenler : dict
+        Üyelik fonksiyonları tanımlanmış değişkenler.
+    """
+    guven = degiskenler['guven']
+    paylasim = degiskenler['paylasim']
+    duygu = degiskenler['duygu']
+    merkezlilik = degiskenler['merkezlilik']
+    risk = degiskenler['risk']
+    
+    if fonksiyon_tipi == 'ucgensel':
+        _ucgensel_uyelik(guven, paylasim, duygu, merkezlilik, risk)
+    elif fonksiyon_tipi == 'yamuksal':
+        _yamuksal_uyelik(guven, paylasim, duygu, merkezlilik, risk)
+    else:  # karisik (varsayılan)
+        _karisik_uyelik(guven, paylasim, duygu, merkezlilik, risk)
+    
+    return degiskenler
+
+
+def _ucgensel_uyelik(guven, paylasim, duygu, merkezlilik, risk):
+    """
+    Tüm değişkenler için üçgensel (triangular) üyelik fonksiyonları.
+    
+    Üçgensel Fonksiyon: trimf([a, b, c])
+    ─────────────────────────────────────
+    μ(x) = 0          , x ≤ a veya x ≥ c
+    μ(x) = (x-a)/(b-a), a < x ≤ b
+    μ(x) = (c-x)/(c-b), b < x < c
+    """
+    # ═══ GÜVEN SKORU [0, 1] ═══
+    # Düşük güven: sol uçta yoğun, 0.4'e kadar azalır
+    guven['dusuk'] = fuzz.trimf(guven.universe, [0, 0, 0.4])
+    # Orta güven: 0.2-0.8 arası, tepe 0.5
+    guven['orta'] = fuzz.trimf(guven.universe, [0.2, 0.5, 0.8])
+    # Yüksek güven: 0.6'dan başlar, sağ uçta yoğun
+    guven['yuksek'] = fuzz.trimf(guven.universe, [0.6, 1, 1])
+    
+    # ═══ PAYLAŞIM SIKLIĞI [0, 50] ═══
+    # Düşük: 0-15 arası
+    paylasim['dusuk'] = fuzz.trimf(paylasim.universe, [0, 0, 15])
+    # Orta: 8-35 arası, tepe 20
+    paylasim['orta'] = fuzz.trimf(paylasim.universe, [8, 20, 35])
+    # Yüksek: 25-50 arası
+    paylasim['yuksek'] = fuzz.trimf(paylasim.universe, [25, 50, 50])
+    
+    # ═══ DUYGU SAPMASI [-1, +1] ═══
+    # Kararlı: sapma düşük, merkeze yakın
+    duygu['kararli'] = fuzz.trimf(duygu.universe, [-0.4, 0, 0.4])
+    # Orta: orta düzeyde sapma (pozitif veya negatif)
+    duygu['orta'] = fuzz.trimf(duygu.universe, [0.2, 0.5, 0.8])
+    # Değişken: yüksek sapma
+    duygu['degisken'] = fuzz.trimf(duygu.universe, [0.5, 1, 1])
+    
+    # Negatif taraftaki orta ve değişken
+    duygu_orta_neg = fuzz.trimf(duygu.universe, [-0.8, -0.5, -0.2])
+    duygu_degisken_neg = fuzz.trimf(duygu.universe, [-1, -1, -0.5])
+    
+    # Simetrik birleştirme: |sapma| olarak değerlendiriyoruz
+    duygu['orta'] = np.maximum(duygu['orta'].mf, duygu_orta_neg)
+    duygu['degisken'] = np.maximum(duygu['degisken'].mf, duygu_degisken_neg)
+    
+    # ═══ MERKEZLİLİK SKORU [0, 1] ═══
+    merkezlilik['dusuk'] = fuzz.trimf(merkezlilik.universe, [0, 0, 0.4])
+    merkezlilik['orta'] = fuzz.trimf(merkezlilik.universe, [0.2, 0.5, 0.8])
+    merkezlilik['yuksek'] = fuzz.trimf(merkezlilik.universe, [0.6, 1, 1])
+    
+    # ═══ RİSK SEVİYESİ [0, 1] ═══
+    risk['dusuk'] = fuzz.trimf(risk.universe, [0, 0, 0.4])
+    risk['orta'] = fuzz.trimf(risk.universe, [0.2, 0.5, 0.8])
+    risk['yuksek'] = fuzz.trimf(risk.universe, [0.6, 1, 1])
+
+
+def _yamuksal_uyelik(guven, paylasim, duygu, merkezlilik, risk):
+    """
+    Tüm değişkenler için yamuksal (trapezoidal) üyelik fonksiyonları.
+    
+    Yamuksal Fonksiyon: trapmf([a, b, c, d])
+    ──────────────────────────────────────────
+    μ(x) = 0            , x ≤ a veya x ≥ d
+    μ(x) = (x-a)/(b-a)  , a < x ≤ b
+    μ(x) = 1            , b < x ≤ c
+    μ(x) = (d-x)/(d-c)  , c < x < d
+    """
+    # ═══ GÜVEN SKORU [0, 1] ═══
+    guven['dusuk'] = fuzz.trapmf(guven.universe, [0, 0, 0.2, 0.45])
+    guven['orta'] = fuzz.trapmf(guven.universe, [0.25, 0.4, 0.6, 0.75])
+    guven['yuksek'] = fuzz.trapmf(guven.universe, [0.55, 0.8, 1, 1])
+    
+    # ═══ PAYLAŞIM SIKLIĞI [0, 50] ═══
+    paylasim['dusuk'] = fuzz.trapmf(paylasim.universe, [0, 0, 5, 15])
+    paylasim['orta'] = fuzz.trapmf(paylasim.universe, [10, 18, 28, 35])
+    paylasim['yuksek'] = fuzz.trapmf(paylasim.universe, [28, 38, 50, 50])
+    
+    # ═══ DUYGU SAPMASI [-1, +1] ═══
+    duygu['kararli'] = fuzz.trapmf(duygu.universe, [-0.3, -0.1, 0.1, 0.3])
+    
+    duygu_orta_poz = fuzz.trapmf(duygu.universe, [0.15, 0.35, 0.55, 0.75])
+    duygu_orta_neg = fuzz.trapmf(duygu.universe, [-0.75, -0.55, -0.35, -0.15])
+    duygu['orta'] = np.maximum(duygu_orta_poz, duygu_orta_neg)
+    
+    duygu_degisken_poz = fuzz.trapmf(duygu.universe, [0.55, 0.75, 1, 1])
+    duygu_degisken_neg = fuzz.trapmf(duygu.universe, [-1, -1, -0.75, -0.55])
+    duygu['degisken'] = np.maximum(duygu_degisken_poz, duygu_degisken_neg)
+    
+    # ═══ MERKEZLİLİK SKORU [0, 1] ═══
+    merkezlilik['dusuk'] = fuzz.trapmf(merkezlilik.universe, [0, 0, 0.2, 0.45])
+    merkezlilik['orta'] = fuzz.trapmf(merkezlilik.universe, [0.25, 0.4, 0.6, 0.75])
+    merkezlilik['yuksek'] = fuzz.trapmf(merkezlilik.universe, [0.55, 0.8, 1, 1])
+    
+    # ═══ RİSK SEVİYESİ [0, 1] ═══
+    risk['dusuk'] = fuzz.trapmf(risk.universe, [0, 0, 0.2, 0.45])
+    risk['orta'] = fuzz.trapmf(risk.universe, [0.25, 0.4, 0.6, 0.75])
+    risk['yuksek'] = fuzz.trapmf(risk.universe, [0.55, 0.8, 1, 1])
+
+
+def _karisik_uyelik(guven, paylasim, duygu, merkezlilik, risk):
+    """
+    Karışık üyelik fonksiyonları: uç değerler için yamuksal, orta için üçgensel.
+    Bu yaklaşım, uç terimlerin düz bölgeleri ile daha doğal modellemeler sağlar.
+    """
+    # ═══ GÜVEN SKORU [0, 1] ═══
+    # Düşük: yamuksal (sol uçta düz bölge)
+    guven['dusuk'] = fuzz.trapmf(guven.universe, [0, 0, 0.15, 0.4])
+    # Orta: üçgensel (tek tepe noktası)
+    guven['orta'] = fuzz.trimf(guven.universe, [0.2, 0.5, 0.8])
+    # Yüksek: yamuksal (sağ uçta düz bölge)
+    guven['yuksek'] = fuzz.trapmf(guven.universe, [0.6, 0.85, 1, 1])
+    
+    # ═══ PAYLAŞIM SIKLIĞI [0, 50] ═══
+    paylasim['dusuk'] = fuzz.trapmf(paylasim.universe, [0, 0, 5, 15])
+    paylasim['orta'] = fuzz.trimf(paylasim.universe, [8, 20, 35])
+    paylasim['yuksek'] = fuzz.trapmf(paylasim.universe, [25, 40, 50, 50])
+    
+    # ═══ DUYGU SAPMASI [-1, +1] ═══
+    # Kararlı: merkeze yakın, düz bölge
+    duygu['kararli'] = fuzz.trapmf(duygu.universe, [-0.3, -0.1, 0.1, 0.3])
+    
+    # Orta: simetrik, orta şiddette sapma
+    duygu_orta_poz = fuzz.trimf(duygu.universe, [0.15, 0.45, 0.75])
+    duygu_orta_neg = fuzz.trimf(duygu.universe, [-0.75, -0.45, -0.15])
+    duygu['orta'] = np.maximum(duygu_orta_poz, duygu_orta_neg)
+    
+    # Değişken: simetrik, yüksek sapma (uçlarda yamuksal)
+    duygu_degisken_poz = fuzz.trapmf(duygu.universe, [0.55, 0.75, 1, 1])
+    duygu_degisken_neg = fuzz.trapmf(duygu.universe, [-1, -1, -0.75, -0.55])
+    duygu['degisken'] = np.maximum(duygu_degisken_poz, duygu_degisken_neg)
+    
+    # ═══ MERKEZLİLİK SKORU [0, 1] ═══
+    merkezlilik['dusuk'] = fuzz.trapmf(merkezlilik.universe, [0, 0, 0.15, 0.4])
+    merkezlilik['orta'] = fuzz.trimf(merkezlilik.universe, [0.2, 0.5, 0.8])
+    merkezlilik['yuksek'] = fuzz.trapmf(merkezlilik.universe, [0.6, 0.85, 1, 1])
+    
+    # ═══ RİSK SEVİYESİ [0, 1] ═══
+    risk['dusuk'] = fuzz.trapmf(risk.universe, [0, 0, 0.15, 0.4])
+    risk['orta'] = fuzz.trimf(risk.universe, [0.2, 0.5, 0.8])
+    risk['yuksek'] = fuzz.trapmf(risk.universe, [0.6, 0.85, 1, 1])
+
+
+def uyelik_fonksiyonlarini_ciz(degiskenler, kaydet_yolu=None):
+    """
+    Tüm değişkenlerin üyelik fonksiyonlarını çizer.
+    
+    Parametreler
+    ------------
+    degiskenler : dict
+        Üyelik fonksiyonları tanımlanmış değişkenler.
+    kaydet_yolu : str, opsiyonel
+        Grafik dosyasının kaydedileceği yol.
+    """
+    turkce_isimler = {
+        'guven': ('Güven Skoru', '[0, 1]'),
+        'paylasim': ('Paylaşım Sıklığı', '[0, 50] gönderi/gün'),
+        'duygu': ('Duygu Sapması', '[-1, +1]'),
+        'merkezlilik': ('Merkezlilik Skoru', '[0, 1]'),
+        'risk': ('Risk Seviyesi', '[0, 1]')
+    }
+    
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig.suptitle('Üyelik Fonksiyonları', fontsize=16, fontweight='bold', y=0.98)
+    
+    renkler = {'dusuk': '#2ecc71', 'orta': '#f39c12', 'yuksek': '#e74c3c',
+               'kararli': '#2ecc71', 'degisken': '#e74c3c'}
+    
+    for idx, (anahtar, degisken) in enumerate(degiskenler.items()):
+        satir, sutun = divmod(idx, 2)
+        ax = axes[satir, sutun]
+        
+        isim, birim = turkce_isimler.get(anahtar, (anahtar, ''))
+        
+        for terim in degisken.terms:
+            renk = renkler.get(terim, '#3498db')
+            terim_turkce = _terim_cevirisi(terim)
+            ax.plot(degisken.universe, degisken[terim].mf,
+                    linewidth=2.5, label=terim_turkce, color=renk)
+            ax.fill_between(degisken.universe, degisken[terim].mf,
+                           alpha=0.15, color=renk)
+        
+        ax.set_title(f'{isim} {birim}', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Değer', fontsize=10)
+        ax.set_ylabel('Üyelik Derecesi μ(x)', fontsize=10)
+        ax.legend(loc='best', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.05, 1.15)
+    
+    # Son alt grafı gizle (5 değişken, 6 alan)
+    axes[2, 1].set_visible(False)
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Üyelik fonksiyonları kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def uyelik_tiplerini_karsilastir(kaydet_yolu=None):
+    """
+    Üçgensel ve yamuksal üyelik fonksiyonlarını karşılaştırır.
+    
+    Aynı değişken (Güven Skoru) için her iki tipi yan yana gösterir.
+    
+    Parametreler
+    ------------
+    kaydet_yolu : str, opsiyonel
+        Grafik dosyasının kaydedileceği yol.
+    """
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle('Üyelik Fonksiyonu Tiplerinin Karşılaştırması (Güven Skoru)',
+                 fontsize=14, fontweight='bold')
+    
+    x = np.linspace(0, 1, 1001)
+    tipler = ['Üçgensel (trimf)', 'Yamuksal (trapmf)', 'Karışık']
+    
+    renkler = ['#2ecc71', '#f39c12', '#e74c3c']
+    etiketler = ['Düşük', 'Orta', 'Yüksek']
+    
+    # Üçgensel
+    ucgensel = [
+        fuzz.trimf(x, [0, 0, 0.4]),
+        fuzz.trimf(x, [0.2, 0.5, 0.8]),
+        fuzz.trimf(x, [0.6, 1, 1])
+    ]
+    
+    # Yamuksal
+    yamuksal = [
+        fuzz.trapmf(x, [0, 0, 0.2, 0.45]),
+        fuzz.trapmf(x, [0.25, 0.4, 0.6, 0.75]),
+        fuzz.trapmf(x, [0.55, 0.8, 1, 1])
+    ]
+    
+    # Karışık
+    karisik = [
+        fuzz.trapmf(x, [0, 0, 0.15, 0.4]),
+        fuzz.trimf(x, [0.2, 0.5, 0.8]),
+        fuzz.trapmf(x, [0.6, 0.85, 1, 1])
+    ]
+    
+    tum_tipler = [ucgensel, yamuksal, karisik]
+    
+    for i, (tip_verileri, tip_adi) in enumerate(zip(tum_tipler, tipler)):
+        ax = axes[i]
+        for j, (mf, etiket) in enumerate(zip(tip_verileri, etiketler)):
+            ax.plot(x, mf, linewidth=2.5, label=etiket, color=renkler[j])
+            ax.fill_between(x, mf, alpha=0.15, color=renkler[j])
+        
+        ax.set_title(tip_adi, fontsize=12, fontweight='bold')
+        ax.set_xlabel('Güven Skoru', fontsize=10)
+        ax.set_ylabel('Üyelik Derecesi μ(x)', fontsize=10)
+        ax.legend(loc='best', fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_ylim(-0.05, 1.15)
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Karşılaştırma grafiği kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def _terim_cevirisi(terim):
+    """Terim adlarını Türkçe'ye çevirir."""
+    ceviriler = {
+        'dusuk': 'Düşük',
+        'orta': 'Orta',
+        'yuksek': 'Yüksek',
+        'kararli': 'Kararlı',
+        'degisken': 'Değişken'
+    }
+    return ceviriler.get(terim, terim.capitalize())
+
+
+if __name__ == "__main__":
+    import os
+    
+    # Test: Karışık üyelik fonksiyonları
+    degiskenler = degiskenleri_olustur()
+    degiskenler = uyelik_fonksiyonlarini_tanimla(degiskenler, 'karisik')
+    
+    # Dizin oluştur
+    cikti_dizini = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "visualization", "output")
+    os.makedirs(cikti_dizini, exist_ok=True)
+    
+    # Üyelik fonksiyonlarını çiz
+    uyelik_fonksiyonlarini_ciz(
+        degiskenler,
+        os.path.join(cikti_dizini, "uyelik_fonksiyonlari.png")
+    )
+    
+    # Karşılaştırma
+    uyelik_tiplerini_karsilastir(
+        os.path.join(cikti_dizini, "uyelik_tipi_karsilastirmasi.png")
+    )
+    
+    print("\n[TEST] Üyelik fonksiyonları modülü başarıyla çalıştı!")
+# -*- coding: utf-8 -*-
+"""
+Kural Tabani Modulu
+====================
+Mamdani bulanik cikarim sistemi icin kural tabanini tanimlar.
+Dinamik girdi secimini (kismi senaryo analizi) desteklemesi icin kurallar
+aktif degiskenlere gore (on-the-fly) insa edilecek sekilde yapilandirilmistir.
+"""
+
+from skfuzzy import control as ctrl
+import pandas as pd
+
+
+def kurallari_olustur(degiskenler, aktif_degiskenler=None):
+    """
+    Bulanik kural tabanini olusturur. Girdisi kapatilmis degiskenleri
+    otomatik olarak kurallardan ayiklar (kirpar).
+    
+    Parametreler
+    ------------
+    degiskenler : dict
+        Uyelik fonksiyonlari tanimlanmis degiskenler.
+    aktif_degiskenler : list, opsiyonel
+        Sistemde kullanilacak (aktif olan) degiskenlerin isim (key) listesi.
+        Belirtilmezse tum degiskenler aktif sayilir.
+    
+    Dondurur
+    --------
+    kurallar : list
+        ctrl.Rule nesnelerinin listesi.
+    kural_aciklamalari : list
+        Her kural icin aciklama metni.
+    """
+    if aktif_degiskenler is None:
+        aktif_degiskenler = ['guven', 'paylasim', 'duygu', 'merkezlilik']
+        
+    r = degiskenler['risk']
+    kurallar = []
+    kural_aciklamalari = []
+    
+    # Aciklamada anlasilabilirlik icin Turkce terim karsiliklari
+    tr_isimler = {
+        'guven': 'Guven', 'paylasim': 'Paylasim', 
+        'duygu': 'Duygu', 'merkezlilik': 'Merkezlilik'
+    }
+    tr_terimler = {
+        'dusuk': 'Dusuk', 'orta': 'Orta', 'yuksek': 'Yuksek',
+        'kararli': 'Kararli', 'degisken': 'Degisken'
+    }
+    
+    def kural_ekle(oncul_listesi, sonuc, gerekce):
+        # Sadece aktif_degiskenler'e dahil olan onculleri filtrele
+        gecerli_onculler = []
+        gecerli_tanimlar = []
+        
+        for deg_adi, terim in oncul_listesi:
+            if deg_adi in aktif_degiskenler:
+                gecerli_onculler.append(degiskenler[deg_adi][terim])
+                isim = tr_isimler[deg_adi]
+                term_tr = tr_terimler[terim]
+                gecerli_tanimlar.append(f"{isim}={term_tr}")
+                
+        # Eger kuraldaki TUM girisler kapatilmissa bu kural sistemden dusurulecek
+        if not gecerli_onculler:
+            return
+            
+        # Kalan onculleri "VE" (AND) ile birlestir
+        kombine = gecerli_onculler[0]
+        for onc in gecerli_onculler[1:]:
+            kombine = kombine & onc
+            
+        kural_obj = ctrl.Rule(kombine, sonuc)
+        kurallar.append(kural_obj)
+        
+        # Dinamik kural aciklamasi (ornek: Guven=Dusuk VE Paylasim=Yuksek -> Yuksek risk)
+        oncul_metni = " VE ".join(gecerli_tanimlar)
+        # sonuc stringini cikaralim (orn: r['yuksek'].label -> get term text)
+        # we know 'sonuc' is an Antecedent term, so `sonuc.term.label` works, but easier to just parse the repr.
+        sonuc_terim = [k for k, v in r.terms.items() if v == sonuc][0]
+        sonuc_metni = f"Risk={tr_terimler[sonuc_terim]}"
+        
+        tam_aciklama = f"{oncul_metni} -> {sonuc_metni}: {gerekce}"
+        kural_aciklamalari.append(tam_aciklama)
+
+    # ═══════════════════════════════════════════════════════════════
+    # HAM KURAL TANIMLARI
+    # Format: kural_ekle([ ('deg_adi', 'terim'), ... ], sonuc_terim, gerekce)
+    # ═══════════════════════════════════════════════════════════════
+
+    # Kural 1
+    kural_ekle(
+        [('guven', 'dusuk'), ('paylasim', 'yuksek')], 
+        r['yuksek'], "Guvenilirligi dusuk kisilerin yogun paylasimi tehlikelidir."
+    )
+    
+    # Kural 2
+    kural_ekle(
+        [('guven', 'yuksek'), ('duygu', 'kararli')],
+        r['dusuk'], "Guvenilir ve tutarli kullanicilar dogru bilgi paylasir."
+    )
+    
+    # Kural 3
+    kural_ekle(
+        [('guven', 'dusuk'), ('duygu', 'degisken')],
+        r['yuksek'], "Dusuk guven + yuksek duygusal sapma yanlis bilgi gostergesidir."
+    )
+    
+    # Kural 4
+    kural_ekle(
+        [('guven', 'yuksek'), ('paylasim', 'dusuk')],
+        r['dusuk'], "Guvenilir ve secici paylasimcilar guvenli kabul edilir."
+    )
+    
+    # Kural 5
+    kural_ekle(
+        [('merkezlilik', 'yuksek'), ('paylasim', 'yuksek')],
+        r['yuksek'], "Merkezi konumdaki yogun paylasimcilar bilgiyi hizla yayar."
+    )
+    
+    # Kural 6
+    kural_ekle(
+        [('merkezlilik', 'dusuk'), ('paylasim', 'dusuk')],
+        r['dusuk'], "Cevresel konumdaki az paylasimcilarin etkisi sinirlidir."
+    )
+    
+    # Kural 7
+    kural_ekle(
+        [('merkezlilik', 'yuksek'), ('duygu', 'degisken')],
+        r['yuksek'], "Merkezdeki duygusal kullanicilar genis capta provokatif etki yaratir."
+    )
+    
+    # Kural 8
+    kural_ekle(
+        [('merkezlilik', 'yuksek'), ('guven', 'dusuk')],
+        r['yuksek'], "Etkili ama guvenilmez kullanicilar ciddi tehdit olusturur."
+    )
+    
+    # Kural 9
+    kural_ekle(
+        [('guven', 'dusuk'), ('paylasim', 'yuksek'), ('duygu', 'degisken')],
+        r['yuksek'], "En tehlikeli profil: guvenilmez, aktif ve duygusal."
+    )
+    
+    # Kural 10
+    kural_ekle(
+        [('guven', 'yuksek'), ('paylasim', 'dusuk'), ('duygu', 'kararli')],
+        r['dusuk'], "En guvenli profil: guvenilir, temkinli ve tutarli."
+    )
+    
+    # Kural 11
+    kural_ekle(
+        [('guven', 'orta'), ('paylasim', 'orta'), ('duygu', 'orta')],
+        r['orta'], "Ortalama profil orta duzeyde risk tasir."
+    )
+    
+    # Kural 12
+    kural_ekle(
+        [('guven', 'dusuk'), ('merkezlilik', 'yuksek'), ('paylasim', 'yuksek')],
+        r['yuksek'], "Super yayici profil: guvenilmez, merkezi ve cok aktif."
+    )
+    
+    # Kural 13
+    kural_ekle(
+        [('guven', 'yuksek'), ('merkezlilik', 'yuksek'), ('duygu', 'kararli')],
+        r['dusuk'], "Guvenilir etki merkezi pozitif bilgi hatti ustlenir."
+    )
+    
+    # Kural 14
+    kural_ekle(
+        [('guven', 'orta'), ('paylasim', 'yuksek')],
+        r['orta'], "Orta guven ile yuksek aktivite belirsiz/orta risk olusturur."
+    )
+    
+    # Kural 15
+    kural_ekle(
+        [('guven', 'dusuk'), ('paylasim', 'orta')],
+        r['orta'], "Dusuk guven ama kismen pasif olma durumu riskin derecesini dusurur."
+    )
+    
+    # Kural 16
+    kural_ekle(
+        [('guven', 'orta'), ('duygu', 'degisken')],
+        r['orta'], "Orta guven ile psikolojik degiskenlik birlesimi suphelidir."
+    )
+    
+    # Kural 17
+    kural_ekle(
+        [('guven', 'yuksek'), ('paylasim', 'yuksek')],
+        r['orta'], "Guvenilir ama cok asiri aktif kullanicilar kismi izleme gerektirir."
+    )
+    
+    # Kural 18
+    kural_ekle(
+        [('merkezlilik', 'orta'), ('paylasim', 'orta')],
+        r['orta'], "Ortalama algoritmik guc standart risk uretir."
+    )
+    
+    # Kural 19
+    kural_ekle(
+        [('merkezlilik', 'dusuk'), ('guven', 'yuksek')],
+        r['dusuk'], "Ag disi konum ve guvenilirlik risksiz sonuc uretir."
+    )
+    
+    # Kural 20
+    kural_ekle(
+        [('merkezlilik', 'orta'), ('duygu', 'degisken'), ('guven', 'dusuk')],
+        r['yuksek'], "Nispeten etkili bir konumda dengesiz bir profil yayilim riski dogurur."
+    )
+    
+    # Kural 21
+    kural_ekle(
+        [('guven', 'dusuk'), ('paylasim', 'dusuk'), ('merkezlilik', 'dusuk')],
+        r['dusuk'], "Guvenilmez olsa da hem pasif hem izole profiller zararsizdir."
+    )
+    
+    # Kural 22
+    kural_ekle(
+        [('guven', 'orta'), ('paylasim', 'dusuk'), ('duygu', 'kararli')],
+        r['dusuk'], "Dengeli orta-olcek profiller tehdit icermez."
+    )
+    
+    # Kural 23
+    kural_ekle(
+        [('merkezlilik', 'yuksek'), ('paylasim', 'orta'), ('duygu', 'orta')],
+        r['orta'], "Agda cok guclu ama standart kullanim yapan biri izlenmelidir."
+    )
+    
+    # Kural 24
+    kural_ekle(
+        [('guven', 'dusuk'), ('merkezlilik', 'orta'), ('duygu', 'degisken'), ('paylasim', 'yuksek')],
+        r['yuksek'], "Dortlu risk faktoru birlesimi kritiklik arz eder."
+    )
+    
+    # Kural 25
+    kural_ekle(
+        [('guven', 'yuksek'), ('merkezlilik', 'yuksek'), ('paylasim', 'yuksek'), ('duygu', 'kararli')],
+        r['orta'], "Guvenli super kullanicilar asiri kullanimda kismi hata yapabilir."
+    )
+    
+    # Kural 26
+    kural_ekle(
+        [('guven', 'orta'), ('duygu', 'kararli')],
+        r['dusuk'], "Guven olcuulebilir bir dengedeyken duygusal karar stabilitedir."
+    )
+    
+    # Kural 27
+    kural_ekle(
+        [('merkezlilik', 'dusuk'), ('duygu', 'kararli')],
+        r['dusuk'], "Yalitilmis kullanici mantikli davrandiginda risksizdir."
+    )
+    
+    # Kural 28
+    kural_ekle(
+        [('guven', 'orta'), ('merkezlilik', 'dusuk')],
+        r['dusuk'], "Orta guven ve dusuk erisim riski absorbe eder."
+    )
+    
+    # Kural 29
+    kural_ekle(
+        [('guven', 'dusuk'), ('paylasim', 'dusuk')],
+        r['dusuk'], "Tehlikeli profil paylasim yapmadigi muddetce etkisizdir."
+    )
+    
+    # Kural 30
+    kural_ekle(
+        [('merkezlilik', 'orta'), ('duygu', 'orta')],
+        r['orta'], "Varsayilan ortalama sosyal ag profili."
+    )
+    
+    # Eger hic kural kalmadiysa (guvenlik icin) bir default kural ekleyelim
+    if len(kurallar) == 0:
+        # En kotu ihtimalle, ciktinin minimum seviyesi gibi default
+        # Kullanici HICBIR degisken secmemisse
+        pass # Bu durumu inferende ele alacagiz (kontrol mekanizmasiyla)
+    else:
+        print(f"[KURALLAR] Dinamik derleme: {len(kurallar)} kural olusturuldu (Ayiklanan ve aktif kalan)")
+        
+    return kurallar, kural_aciklamalari
+
+
+def kural_tablosu_olustur(kural_aciklamalari):
+    """
+    Kurallari tablo formatinda gosterir.
+    """
+    veriler = []
+    
+    for i, aciklama in enumerate(kural_aciklamalari, 1):
+        try:
+            kural_metni, gerekce = aciklama.split(': ', 1)
+        except ValueError:
+            kural_metni = aciklama
+            gerekce = ""
+            
+        if ' -> ' in kural_metni:
+            oncul, sonuc = kural_metni.rsplit(' -> ', 1)
+        else:
+            oncul = kural_metni
+            sonuc = ''
+        
+        veriler.append({
+            'Kural No': f'K{i}',
+            'Oncul (EGER)': oncul.replace(' VE ', '\nVE '),
+            'Sonuc (O HALDE)': sonuc,
+            'Gerekce': gerekce
+        })
+    
+    df = pd.DataFrame(veriler)
+    return df
+
+# -*- coding: utf-8 -*-
+"""
+Streamlit GUI Uygulaması
+=========================
+Sosyal Ağlarda Yanlış Bilgi Riskinin Bulanık Mantık ile Modellenmesi
+için interaktif web arayüzü.
+
+Çalıştırma: streamlit run gui/app.py
+"""
+
+import os
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Proje kök dizinini Python path'e ekle
+PROJE_DIZINI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PROJE_DIZINI)
+
+import streamlit as st
+import skfuzzy as fuzz
+
+from fuzzy_system.inference import BulanikCikarimSistemi
+from fuzzy_system.rules import kural_tablosu_olustur
+from models.baseline import TemelModel
+
+
+# ═══════════════════════════════════════════════════════════
+# SAYFA YAPILANDIRMASI
+# ═══════════════════════════════════════════════════════════
+
+st.set_page_config(
+    page_title="Bulanık Mantık - Yanlış Bilgi Risk Analizi",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Özel CSS stilleri
+st.markdown("""
+<style>
+    .main-header {
+        text-align: center;
+        padding: 1rem 0;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+    }
+    .risk-card {
+        padding: 1.5rem;
+        border-radius: 10px;
+        text-align: center;
+        font-size: 1.2rem;
+        font-weight: bold;
+        margin: 1rem 0;
+    }
+    .risk-low {
+        background: linear-gradient(135deg, #00b09b, #96c93d);
+        color: white;
+    }
+    .risk-medium {
+        background: linear-gradient(135deg, #f7971e, #ffd200);
+        color: white;
+    }
+    .risk-high {
+        background: linear-gradient(135deg, #e74c3c, #c0392b);
+        color: white;
+    }
+    .metric-box {
+        background: #f0f2f6;
+        padding: 1rem;
+        border-radius: 8px;
+        text-align: center;
+        margin: 0.5rem 0;
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        padding: 10px 20px;
+        border-radius: 5px;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# DURUM YÖNETİMİ
+# ═══════════════════════════════════════════════════════════
+
+@st.cache_resource
+def sistemi_yukle():
+    """Bulanık çıkarım sistemini yükler ve önbelleğe alır."""
+    fis = BulanikCikarimSistemi('karisik')
+    temel = TemelModel()
+    return fis, temel
+
+
+# Sistemi yükle
+fis, temel_model = sistemi_yukle()
+
+
+# ═══════════════════════════════════════════════════════════
+# BAŞLIK
+# ═══════════════════════════════════════════════════════════
+
+st.markdown("""
+<div class="main-header">
+    <h1>🧠 Bulanık Mantık ile Yanlış Bilgi Risk Analizi</h1>
+    <p>Sosyal Ağlarda Yanlış Bilgi Yayma Riskinin Mamdani Tipi FIS ile Modellenmesi</p>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# KENAR ÇUBUĞU - GİRİŞ PANELİ
+# ═══════════════════════════════════════════════════════════
+
+st.sidebar.header("📥 Giriş Parametreleri")
+
+st.sidebar.markdown("**✅ Kullanılacak Girdiler (Kısmi Analiz)**")
+use_guven = st.sidebar.checkbox("Güven Skoru", value=True)
+use_paylasim = st.sidebar.checkbox("Paylaşım Sıklığı", value=True)
+use_duygu = st.sidebar.checkbox("Duygu Sapması", value=True)
+use_merkezlilik = st.sidebar.checkbox("Merkezlilik Skoru", value=True)
+
+aktifler = []
+if use_guven: aktifler.append('guven')
+if use_paylasim: aktifler.append('paylasim')
+if use_duygu: aktifler.append('duygu')
+if use_merkezlilik: aktifler.append('merkezlilik')
+
+# Sistemi secilen girdilere gore guncelle
+fis.aktif_girdileri_ayarla(aktifler)
+
+st.sidebar.markdown("---")
+
+sozel_giris_modu = st.sidebar.checkbox("🔠 Sözel (Sıfat) Giriş Modu", value=False, help="Sayısal kaydırıcılar yerine bulanık terimleri seçerek (Düşük, Orta vb.) giriş yapmanızı sağlar.")
+
+if sozel_giris_modu:
+    st.sidebar.info("Aşağıdaki terimler arka planda ilgili bulanık kümenin zirve değerine dönüştürülerek hesaplanır.")
+    
+    map_guven = {"Düşük": 0.15, "Orta": 0.50, "Yüksek": 0.85}
+    sec_guven = st.sidebar.selectbox("🛡️ Güven Skoru", list(map_guven.keys()), index=1, disabled=not use_guven)
+    guven = map_guven[sec_guven]
+    
+    map_paylasim = {"Düşük": 5.0, "Orta": 20.0, "Yüksek": 40.0}
+    sec_paylasim = st.sidebar.selectbox("📝 Paylaşım Sıklığı", list(map_paylasim.keys()), index=1, disabled=not use_paylasim)
+    paylasim = map_paylasim[sec_paylasim]
+    
+    map_duygu = {"Değişken (Negatif)": -0.85, "Orta (Negatif)": -0.45, "Kararlı": 0.0, "Orta (Pozitif)": 0.45, "Değişken (Pozitif)": 0.85}
+    sec_duygu = st.sidebar.selectbox("💭 Duygu Sapması", list(map_duygu.keys()), index=2, disabled=not use_duygu)
+    duygu = map_duygu[sec_duygu]
+    
+    map_merkezlilik = {"Düşük": 0.15, "Orta": 0.50, "Yüksek": 0.85}
+    sec_merkezlilik = st.sidebar.selectbox("🌐 Merkezlilik Skoru", list(map_merkezlilik.keys()), index=1, disabled=not use_merkezlilik)
+    merkezlilik = map_merkezlilik[sec_merkezlilik]
+
+else:
+    # Rastgele veri üretme butonu
+    if st.sidebar.button("🎲 Rastgele Veri Üret", use_container_width=True):
+        st.session_state['guven'] = float(np.random.uniform(0, 1))
+        st.session_state['paylasim'] = float(np.random.randint(0, 50))
+        st.session_state['duygu'] = float(np.random.uniform(-1, 1))
+        st.session_state['merkezlilik'] = float(np.random.uniform(0, 1))
+
+    # Slider'lar
+    guven = st.sidebar.slider(
+        "🛡️ Güven Skoru",
+        min_value=0.0, max_value=1.0,
+        value=st.session_state.get('guven', 0.5),
+        step=0.01,
+        help="Kullanıcının güvenilirlik skoru. 0=Güvenilmez, 1=Tamamen Güvenilir",
+        disabled=not use_guven
+    )
+
+    paylasim = st.sidebar.slider(
+        "📝 Paylaşım Sıklığı (gönderi/gün)",
+        min_value=0.0, max_value=50.0,
+        value=st.session_state.get('paylasim', 15.0),
+        step=1.0,
+        help="Günlük ortalama paylaşım sayısı",
+        disabled=not use_paylasim
+    )
+
+    duygu = st.sidebar.slider(
+        "💭 Duygu Sapması",
+        min_value=-1.0, max_value=1.0,
+        value=st.session_state.get('duygu', 0.2),
+        step=0.01,
+        help="Duygusal sapma. 0=Kararlı, ±1=Çok Değişken",
+        disabled=not use_duygu
+    )
+
+    merkezlilik = st.sidebar.slider(
+        "🌐 Merkezlilik Skoru",
+        min_value=0.0, max_value=1.0,
+        value=st.session_state.get('merkezlilik', 0.5),
+        step=0.01,
+        help="Sosyal ağdaki merkezlilik konumu. 0=Çevresel, 1=Merkezi",
+        disabled=not use_merkezlilik
+    )
+
+st.sidebar.markdown("---")
+st.sidebar.markdown("**⚙️ Sistem Ayarları**")
+aciklanabilir_mod = st.sidebar.checkbox("🔍 Açıklanabilir AI Modu", value=True)
+
+
+# ═══════════════════════════════════════════════════════════
+# ANA İÇERİK
+# ═══════════════════════════════════════════════════════════
+
+# Risk hesapla
+risk = fis.hesapla(guven, paylasim, duygu, merkezlilik)
+temel_risk = temel_model.tahmin(guven, paylasim, duygu, merkezlilik)
+
+# Risk kategorisi
+if risk < 0.35:
+    kategori = "DÜŞÜK"
+    renk_sinif = "risk-low"
+    emoji = "🟢"
+elif risk < 0.65:
+    kategori = "ORTA"
+    renk_sinif = "risk-medium"
+    emoji = "🟡"
+else:
+    kategori = "YÜKSEK"
+    renk_sinif = "risk-high"
+    emoji = "🔴"
+
+
+# ══════════════════════════════════════
+# SEKMELER
+# ══════════════════════════════════════
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Sonuç Paneli",
+    "🔍 Kural İnceleme",
+    "📈 Görselleştirme",
+    "⚡ Duyarlılık",
+    "📁 Toplu Analiz"
+])
+
+
+# ═══════════════════════════════════════════════════════════
+# SEKME 1: SONUÇ PANELİ
+# ═══════════════════════════════════════════════════════════
+
+with tab1:
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.markdown(f"""
+        <div class="risk-card {renk_sinif}">
+            <h2>{emoji} Risk Seviyesi: {risk:.4f}</h2>
+            <h3>Kategori: {kategori}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col2:
+        st.metric("🧠 Bulanık Model", f"{risk:.4f}")
+        st.metric("📐 Temel Model", f"{temel_risk:.4f}")
+    
+    with col3:
+        fark = risk - temel_risk
+        st.metric("Fark", f"{fark:+.4f}")
+        st.metric("Model Farkı", f"{abs(fark)*100:.1f}%")
+    
+    st.markdown("---")
+    
+    # Giriş özeti
+    st.subheader("📥 Giriş Değerleri Özeti")
+    giris_col1, giris_col2, giris_col3, giris_col4 = st.columns(4)
+    
+    with giris_col1:
+        st.metric("🛡️ Güven", f"{guven:.2f}")
+    with giris_col2:
+        st.metric("📝 Paylaşım", f"{paylasim:.0f}/gün")
+    with giris_col3:
+        st.metric("💭 Duygu", f"{duygu:+.2f}")
+    with giris_col4:
+        st.metric("🌐 Merkezlilik", f"{merkezlilik:.2f}")
+    
+    # Açıklanabilir AI Modu
+    if aciklanabilir_mod:
+        st.markdown("---")
+        st.subheader("🔍 Açıklanabilir AI - Adım Adım Çıkarım")
+        
+        sonuclar = fis.ara_sonuclari_al(guven, paylasim, duygu, merkezlilik)
+        
+        # Bulanıklaştırma adımı
+        st.markdown("**📌 Adım 1: Bulanıklaştırma (Fuzzification)**")
+        
+        turkce_degiskenler = {
+            'guven': 'Güven Skoru',
+            'paylasim': 'Paylaşım Sıklığı',
+            'duygu': 'Duygu Sapması',
+            'merkezlilik': 'Merkezlilik Skoru'
+        }
+        turkce_terimler = {
+            'dusuk': 'Düşük', 'orta': 'Orta', 'yuksek': 'Yüksek',
+            'kararli': 'Kararlı', 'degisken': 'Değişken'
+        }
+        
+        uyelik_verileri = []
+        for deg_adi, terimler in sonuclar['uyelik_dereceleri'].items():
+            for terim, derece in terimler.items():
+                uyelik_verileri.append({
+                    'Değişken': turkce_degiskenler.get(deg_adi, deg_adi),
+                    'Terim': turkce_terimler.get(terim, terim),
+                    'Üyelik Derecesi': f"{derece:.4f}",
+                    'Görsel': '█' * int(derece * 20) + '░' * (20 - int(derece * 20))
+                })
+        
+        st.dataframe(
+            pd.DataFrame(uyelik_verileri),
+            use_container_width=True,
+            hide_index=True
+        )
+        
+        # Çıkarım adımları
+        st.markdown("""
+        **⚙️ Adım 2-3: Kural Değerlendirme ve Toplama**
+        - VE (AND) operatörü: **min** (minimum)
+        - VEYA (OR) operatörü: **max** (maksimum)
+        - Toplama yöntemi: **max** (maksimum)
+        
+        **📌 Adım 4: Durulaştırma (Defuzzification)**
+        - Yöntem: **Ağırlık Merkezi (Centroid)**
+        - Formül: z* = ∫ z · μ_agg(z) dz / ∫ μ_agg(z) dz
+        """)
+
+
+# ═══════════════════════════════════════════════════════════
+# SEKME 2: KURAL İNCELEME
+# ═══════════════════════════════════════════════════════════
+
+with tab2:
+    st.subheader("📜 Bulanık Kural Tabanı")
+    
+    # Kural tablosu
+    tablo = kural_tablosu_olustur(fis.kural_aciklamalari)
+    st.dataframe(tablo, use_container_width=True, hide_index=True)
+    
+    st.markdown(f"**Toplam: {len(fis.kurallar)} kural**")
+    
+    # Kural aktivasyonları
+    st.markdown("---")
+    st.subheader("🎯 Mevcut Girişler İçin Üyelik Dereceleri")
+    
+    uyelikler = fis.kural_ateslemelerini_al(guven, paylasim, duygu, merkezlilik)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    turkce_degiskenler_degerler = {
+        'guven': ('Güven Skoru', guven),
+        'paylasim': ('Paylaşım Sıklığı', paylasim),
+        'duygu': ('Duygu Sapması', duygu),
+        'merkezlilik': ('Merkezlilik Skoru', merkezlilik)
+    }
+    
+    renkler = {'dusuk': '#2ecc71', 'orta': '#f39c12', 'yuksek': '#e74c3c',
+               'kararli': '#2ecc71', 'degisken': '#e74c3c'}
+    
+    for idx, (deg_adi, terimler) in enumerate(uyelikler.items()):
+        satir, sutun = divmod(idx, 2)
+        ax = axes[satir, sutun]
+        isim, deger = turkce_degiskenler_degerler[deg_adi]
+        
+        terim_isimleri = [turkce_terimler.get(t, t) for t in terimler.keys()]
+        degerler = list(terimler.values())
+        bar_renkleri = [renkler.get(t, '#3498db') for t in terimler.keys()]
+        
+        bars = ax.bar(terim_isimleri, degerler, color=bar_renkleri, edgecolor='white')
+        for bar, d in zip(bars, degerler):
+            if d > 0.01:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                       f'{d:.3f}', ha='center', fontsize=10, fontweight='bold')
+        
+        ax.set_title(f'{isim} = {deger:.2f}', fontweight='bold')
+        ax.set_ylabel('μ(x)')
+        ax.set_ylim(0, 1.15)
+        ax.grid(True, axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+# SEKME 3: GÖRSELLEŞTİRME
+# ═══════════════════════════════════════════════════════════
+
+with tab3:
+    gorsel_secim = st.selectbox(
+        "Görselleştirme Seçin:",
+        ["Üyelik Fonksiyonları", "3D Yüzey Grafiği", "Isı Haritası"]
+    )
+    
+    if gorsel_secim == "Üyelik Fonksiyonları":
+        st.subheader("📐 Üyelik Fonksiyonları")
+        
+        fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+        renkler_uyelik = {'dusuk': '#2ecc71', 'orta': '#f39c12', 'yuksek': '#e74c3c',
+                          'kararli': '#2ecc71', 'degisken': '#e74c3c'}
+        
+        turkce_degisken_bilgileri = {
+            'guven': ('Güven Skoru', '[0, 1]'),
+            'paylasim': ('Paylaşım Sıklığı', '[0, 50]'),
+            'duygu': ('Duygu Sapması', '[-1, +1]'),
+            'merkezlilik': ('Merkezlilik Skoru', '[0, 1]'),
+            'risk': ('Risk Seviyesi', '[0, 1]')
+        }
+        
+        for idx, (anahtar, degisken) in enumerate(fis.degiskenler.items()):
+            satir, sutun = divmod(idx, 2)
+            ax = axes[satir, sutun]
+            isim, birim = turkce_degisken_bilgileri.get(anahtar, (anahtar, ''))
+            
+            for terim in degisken.terms:
+                renk = renkler_uyelik.get(terim, '#3498db')
+                terim_tr = turkce_terimler.get(terim, terim.capitalize())
+                ax.plot(degisken.universe, degisken[terim].mf,
+                       linewidth=2.5, label=terim_tr, color=renk)
+                ax.fill_between(degisken.universe, degisken[terim].mf,
+                               alpha=0.15, color=renk)
+            
+            ax.set_title(f'{isim} {birim}', fontweight='bold')
+            ax.set_ylabel('μ(x)')
+            ax.legend(loc='best')
+            ax.grid(True, alpha=0.3)
+            ax.set_ylim(-0.05, 1.15)
+        
+        axes[2, 1].set_visible(False)
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+        
+        st.markdown("---")
+        st.subheader("🧮 Matematiksel Gösterimler (Formüller)")
+        st.markdown("Yukarıda gördüğünüz üyelik fonksiyonlarının resmi matematiksel, parçalı `(piecewise)` denklem şemaları aşağıda verilmiştir:")
+        
+        try:
+            from visualization.formulas import get_trimf_latex, get_trapmf_latex
+            
+            with st.expander("🛡️ Güven Skoru Fonksiyonları | Sembol: G(x)", expanded=False):
+                st.latex(get_trapmf_latex('G_{Düşük}', 0, 0, 0.15, 0.4))
+                st.latex(get_trimf_latex('G_{Orta}', 0.2, 0.5, 0.8))
+                st.latex(get_trapmf_latex('G_{Yüksek}', 0.6, 0.85, 1, 1))
+
+            with st.expander("📝 Paylaşım Sıklığı Fonksiyonları | Sembol: P(x)", expanded=False):
+                st.latex(get_trapmf_latex('P_{Düşük}', 0, 0, 5, 15))
+                st.latex(get_trimf_latex('P_{Orta}', 8, 20, 35))
+                st.latex(get_trapmf_latex('P_{Yüksek}', 25, 40, 50, 50))
+                
+            with st.expander("💭 Duygu Sapması Fonksiyonları | Sembol: S(x)", expanded=False):
+                st.latex(get_trapmf_latex('S_{Kararlı}', -0.3, -0.1, 0.1, 0.3))
+                st.markdown("Duygu sapması pozitif ve negatif simetrik iki ayrı omuzdan oluşur:")
+                st.latex(get_trimf_latex('S_{Orta}', 0.15, 0.45, 0.75))
+                st.latex(get_trapmf_latex('S_{Değişken}', 0.55, 0.75, 1, 1))
+                
+            with st.expander("🌐 Merkezlilik Skoru Fonksiyonları | Sembol: C(x)", expanded=False):
+                st.latex(get_trapmf_latex('C_{Düşük}', 0, 0, 0.15, 0.4))
+                st.latex(get_trimf_latex('C_{Orta}', 0.2, 0.5, 0.8))
+                st.latex(get_trapmf_latex('C_{Yüksek}', 0.6, 0.85, 1, 1))
+                
+        except Exception as e:
+            st.warning(f"Formüller yüklenemedi: {e}")
+    
+    elif gorsel_secim == "3D Yüzey Grafiği":
+        st.subheader("🏔️ 3D Risk Yüzeyi")
+        
+        eksen_secenekleri = {
+            'Güven Skoru': 'guven_skoru',
+            'Paylaşım Sıklığı': 'paylasim_sikligi', 
+            'Duygu Sapması': 'duygu_sapmasi',
+            'Merkezlilik Skoru': 'merkezlilik_skoru'
+        }
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            eksen_x = st.selectbox("X Ekseni:", list(eksen_secenekleri.keys()), index=0)
+        with col2:
+            eksen_y = st.selectbox("Y Ekseni:", list(eksen_secenekleri.keys()), index=3)
+        
+        cozunurluk = st.slider("Çözünürlük:", 10, 40, 25)
+        
+        if st.button("3D Grafik Oluştur", type="primary"):
+            with st.spinner("3D yüzey hesaplanıyor..."):
+                from visualization.plots import yuzey_grafigi_3d
+                fig = yuzey_grafigi_3d(
+                    fis,
+                    eksen_secenekleri[eksen_x],
+                    eksen_secenekleri[eksen_y],
+                    cozunurluk=cozunurluk
+                )
+                st.pyplot(fig)
+                plt.close()
+    
+    elif gorsel_secim == "Isı Haritası":
+        st.subheader("🌡️ Risk Isı Haritası")
+        
+        eksen_secenekleri = {
+            'Güven Skoru': 'guven_skoru',
+            'Paylaşım Sıklığı': 'paylasim_sikligi',
+            'Duygu Sapması': 'duygu_sapmasi',
+            'Merkezlilik Skoru': 'merkezlilik_skoru'
+        }
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            hm_x = st.selectbox("X Ekseni:", list(eksen_secenekleri.keys()), index=0, key='hm_x')
+        with col2:
+            hm_y = st.selectbox("Y Ekseni:", list(eksen_secenekleri.keys()), index=3, key='hm_y')
+        
+        if st.button("Isı Haritası Oluştur", type="primary"):
+            with st.spinner("Isı haritası hesaplanıyor..."):
+                from visualization.plots import isi_haritasi
+                fig = isi_haritasi(
+                    fis,
+                    eksen_secenekleri[hm_x],
+                    eksen_secenekleri[hm_y],
+                    cozunurluk=35
+                )
+                st.pyplot(fig)
+                plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+# SEKME 4: DUYARLILIK ANALİZİ
+# ═══════════════════════════════════════════════════════════
+
+with tab4:
+    st.subheader("⚡ Duyarlılık Analizi")
+    
+    if st.button("Duyarlılık Grafiklerini Oluştur", type="primary"):
+        with st.spinner("Duyarlılık analizi yapılıyor..."):
+            from visualization.plots import duyarlilik_grafikleri
+            fig = duyarlilik_grafikleri(fis)
+            st.pyplot(fig)
+            plt.close()
+    
+    st.markdown("---")
+    st.subheader("🔬 Detaylı Tek Değişken Analizi")
+    
+    secilen_degisken = st.selectbox(
+        "Analiz edilecek değişken:",
+        ['Güven Skoru', 'Paylaşım Sıklığı', 'Duygu Sapması', 'Merkezlilik Skoru']
+    )
+    
+    degisken_esle = {
+        'Güven Skoru': ('guven', 0, 1),
+        'Paylaşım Sıklığı': ('paylasim', 0, 50),
+        'Duygu Sapması': ('duygu', -1, 1),
+        'Merkezlilik Skoru': ('merkezlilik', 0, 1)
+    }
+    
+    deg_adi, deg_min, deg_max = degisken_esle[secilen_degisken]
+    
+    n_nokta = 100
+    x_values = np.linspace(deg_min, deg_max, n_nokta)
+    risk_values = []
+    
+    sabit = {'guven': guven, 'paylasim': paylasim, 'duygu': duygu, 'merkezlilik': merkezlilik}
+    
+    for x in x_values:
+        degerler = sabit.copy()
+        degerler[deg_adi] = x
+        r = fis.hesapla(degerler['guven'], degerler['paylasim'],
+                       degerler['duygu'], degerler['merkezlilik'])
+        risk_values.append(r)
+    
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(x_values, risk_values, 'b-', linewidth=2.5, color='#2980b9')
+    ax.fill_between(x_values, risk_values, alpha=0.15, color='#2980b9')
+    ax.axhline(y=0.35, color='green', linestyle='--', alpha=0.5, label='Düşük/Orta sınır')
+    ax.axhline(y=0.65, color='red', linestyle='--', alpha=0.5, label='Orta/Yüksek sınır')
+    
+    # Mevcut değer işareti
+    mevcut_deger = sabit[deg_adi]
+    mevcut_risk = fis.hesapla(sabit['guven'], sabit['paylasim'], sabit['duygu'], sabit['merkezlilik'])
+    ax.plot(mevcut_deger, mevcut_risk, 'ro', markersize=12, label=f'Mevcut: {mevcut_deger:.2f}')
+    
+    ax.set_xlabel(secilen_degisken, fontsize=12)
+    ax.set_ylabel('Risk Seviyesi', fontsize=12)
+    ax.set_title(f'{secilen_degisken} Duyarlılık Analizi', fontsize=13, fontweight='bold')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    
+    plt.tight_layout()
+    st.pyplot(fig)
+    plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+# SEKME 5: TOPLU ANALİZ
+# ═══════════════════════════════════════════════════════════
+
+with tab5:
+    st.subheader("📁 CSV Dosyası ile Toplu Analiz")
+    
+    yuklenen_dosya = st.file_uploader(
+        "CSV dosyası yükleyin (sütunlar: guven_skoru, paylasim_sikligi, duygu_sapmasi, merkezlilik_skoru)",
+        type=['csv']
+    )
+    
+    if yuklenen_dosya is not None:
+        df = pd.read_csv(yuklenen_dosya)
+        st.write(f"Yüklenen veri: {len(df)} satır")
+        st.dataframe(df.head(10))
+        
+        gerekli_sutunlar = ['guven_skoru', 'paylasim_sikligi', 'duygu_sapmasi', 'merkezlilik_skoru']
+        if all(s in df.columns for s in gerekli_sutunlar):
+            if st.button("Toplu Risk Hesapla", type="primary"):
+                with st.spinner("Risk hesaplanıyor..."):
+                    riskler = fis.toplu_hesapla(df)
+                    df['risk_seviyesi'] = np.round(riskler, 4)
+                    df['risk_kategorisi'] = pd.cut(
+                        df['risk_seviyesi'],
+                        bins=[0, 0.35, 0.65, 1.0],
+                        labels=['Düşük', 'Orta', 'Yüksek'],
+                        include_lowest=True
+                    )
+                    
+                    st.success(f"✅ {len(df)} örnek için risk hesaplandı!")
+                    st.dataframe(df)
+                    
+                    # Risk dağılımı
+                    fig, ax = plt.subplots(figsize=(8, 4))
+                    ax.hist(riskler, bins=30, density=True, alpha=0.6, color='#3498db',
+                           edgecolor='white')
+                    ax.set_xlabel('Risk Seviyesi')
+                    ax.set_ylabel('Yoğunluk')
+                    ax.set_title('Toplu Analiz - Risk Dağılımı')
+                    ax.grid(True, alpha=0.3)
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    plt.close()
+                    
+                    # İndirme butonu
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        "📥 Sonuçları İndir (CSV)",
+                        csv,
+                        "risk_sonuclari.csv",
+                        "text/csv"
+                    )
+        else:
+            st.error(f"❌ Gerekli sütunlar bulunamadı: {gerekli_sutunlar}")
+    
+    st.markdown("---")
+    st.subheader("🎲 Rastgele Toplu Veri Üretimi")
+    
+    n_rastgele = st.number_input("Örnek sayısı:", min_value=10, max_value=5000, value=100, step=10)
+    
+    if st.button("Rastgele Veri Üret ve Analiz Et"):
+        with st.spinner(f"{n_rastgele} örnek üretiliyor..."):
+            np.random.seed(None)
+            df_rastgele = pd.DataFrame({
+                'guven_skoru': np.round(np.random.uniform(0, 1, n_rastgele), 4),
+                'paylasim_sikligi': np.random.poisson(8, n_rastgele).clip(0, 50).astype(float),
+                'duygu_sapmasi': np.round(np.random.normal(0, 0.35, n_rastgele).clip(-1, 1), 4),
+                'merkezlilik_skoru': np.round(np.random.beta(2, 5, n_rastgele), 4)
+            })
+            
+            riskler = fis.toplu_hesapla(df_rastgele)
+            df_rastgele['risk_seviyesi'] = np.round(riskler, 4)
+            df_rastgele['risk_kategorisi'] = pd.cut(
+                df_rastgele['risk_seviyesi'],
+                bins=[0, 0.35, 0.65, 1.0],
+                labels=['Düşük', 'Orta', 'Yüksek'],
+                include_lowest=True
+            )
+            
+            st.success(f"✅ {n_rastgele} örnek üretildi ve analiz edildi!")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Ortalama Risk", f"{riskler.mean():.4f}")
+            with col2:
+                st.metric("Min Risk", f"{riskler.min():.4f}")
+            with col3:
+                st.metric("Max Risk", f"{riskler.max():.4f}")
+            
+            st.dataframe(df_rastgele.head(20))
+            
+            # Dağılım grafiği
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.hist(riskler, bins=30, density=True, alpha=0.6, color='#9b59b6',
+                   edgecolor='white')
+            ax.axvspan(0, 0.35, alpha=0.1, color='green')
+            ax.axvspan(0.35, 0.65, alpha=0.1, color='orange')
+            ax.axvspan(0.65, 1, alpha=0.1, color='red')
+            ax.set_xlabel('Risk Seviyesi')
+            ax.set_ylabel('Yoğunluk')
+            ax.set_title('Rastgele Veri - Risk Dağılımı')
+            ax.grid(True, alpha=0.3)
+            plt.tight_layout()
+            st.pyplot(fig)
+            plt.close()
+
+
+# ═══════════════════════════════════════════════════════════
+# ALT BİLGİ
+# ═══════════════════════════════════════════════════════════
+
+st.markdown("---")
+st.markdown("""
+<div style="text-align: center; color: #888; padding: 1rem;">
+    <p>🧠 Sosyal Ağlarda Yanlış Bilgi Riskinin Bulanık Mantık ile Modellenmesi</p>
+    <p>Mamdani Tipi Bulanık Çıkarım Sistemi | Python + scikit-fuzzy + Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
+# -*- coding: utf-8 -*-
+"""
+Temel Karşılaştırma Modeli (Baseline)
+=======================================
+Bulanık mantık sistemiyle karşılaştırma için ağırlıklı doğrusal model.
+
+Model Formülü
+--------------
+Risk = w1·(1 - Güven) + w2·norm(Paylaşım) + w3·norm(Duygu) + w4·Merkezlilik
+
+Burada:
+- w1, w2, w3, w4: ağırlık katsayıları (toplam = 1)
+- norm(Paylaşım) = Paylaşım / 50 (0-50 aralığını 0-1'e dönüştürür)
+- norm(Duygu) = |Duygu| (mutlak sapma)
+
+Karşılaştırma Metrikleri
+-------------------------
+- MSE (Mean Squared Error): Ortalama Karesel Hata
+- MAE (Mean Absolute Error): Ortalama Mutlak Hata
+- Korelasyon (Pearson)
+- Doğruluk (Accuracy): Risk kategorisi eşleşme oranı
+- Kesinlik (Precision), Duyarlılık (Recall), F1-Skor
+"""
+
+import numpy as np
+import pandas as pd
+from sklearn.metrics import (
+    mean_squared_error, mean_absolute_error,
+    accuracy_score, precision_score, recall_score, f1_score,
+    confusion_matrix, classification_report
+)
+from scipy.stats import pearsonr
+
+
+class TemelModel:
+    """
+    Ağırlıklı doğrusal temel model (Weighted Linear Baseline).
+    
+    Bulanık mantık sistemiyle karşılaştırma referansı olarak kullanılır.
+    """
+    
+    def __init__(self, w1=0.30, w2=0.25, w3=0.20, w4=0.25):
+        """
+        Temel modeli başlatır.
+        
+        Parametreler
+        ------------
+        w1 : float - Güven ağırlığı (varsayılan: 0.30)
+        w2 : float - Paylaşım sıklığı ağırlığı (varsayılan: 0.25)
+        w3 : float - Duygu sapması ağırlığı (varsayılan: 0.20)
+        w4 : float - Merkezlilik ağırlığı (varsayılan: 0.25)
+        """
+        # Ağırlıkları normalize et
+        toplam = w1 + w2 + w3 + w4
+        self.w1 = w1 / toplam
+        self.w2 = w2 / toplam
+        self.w3 = w3 / toplam
+        self.w4 = w4 / toplam
+        
+        print(f"[TEMEL MODEL] Agirliklar: w1={self.w1:.3f}, w2={self.w2:.3f}, "
+              f"w3={self.w3:.3f}, w4={self.w4:.3f}")
+    
+    def tahmin(self, guven, paylasim, duygu, merkezlilik):
+        """
+        Tek bir giriş seti için risk tahmini yapar.
+        
+        Risk = w1·(1-Güven) + w2·(Paylaşım/50) + w3·|Duygu| + w4·Merkezlilik
+        """
+        risk = (
+            self.w1 * (1 - np.clip(guven, 0, 1)) +
+            self.w2 * np.clip(paylasim / 50.0, 0, 1) +
+            self.w3 * np.abs(np.clip(duygu, -1, 1)) +
+            self.w4 * np.clip(merkezlilik, 0, 1)
+        )
+        return np.clip(risk, 0, 1)
+    
+    def toplu_tahmin(self, df):
+        """
+        DataFrame üzerinde toplu risk tahmini yapar.
+        
+        Parametreler
+        ------------
+        df : pandas.DataFrame
+            Giriş verisi.
+        
+        Döndürür
+        --------
+        tahminler : numpy.ndarray
+            Tahmin edilen risk değerleri.
+        """
+        print(f"[TEMEL MODEL] Toplu tahmin: {len(df)} ornek...")
+        
+        tahminler = np.array([
+            self.tahmin(
+                satir['guven_skoru'],
+                satir['paylasim_sikligi'],
+                satir['duygu_sapmasi'],
+                satir['merkezlilik_skoru']
+            )
+            for _, satir in df.iterrows()
+        ])
+        
+        print(f"[TEMEL MODEL] Tahmin araligi: [{tahminler.min():.4f}, {tahminler.max():.4f}]")
+        return tahminler
+
+
+def risk_kategorisi_belirle(risk_degerleri, esikler=(0.35, 0.65)):
+    """
+    Risk değerlerini kategorilere ayırır.
+    
+    Parametreler
+    ------------
+    risk_degerleri : numpy.ndarray
+        Risk değerleri [0, 1].
+    esikler : tuple
+        (düşük_üst, yüksek_alt) eşik değerleri.
+    
+    Döndürür
+    --------
+    kategoriler : numpy.ndarray
+        0: Düşük, 1: Orta, 2: Yüksek
+    """
+    kategoriler = np.zeros(len(risk_degerleri), dtype=int)
+    kategoriler[risk_degerleri >= esikler[0]] = 1
+    kategoriler[risk_degerleri >= esikler[1]] = 2
+    return kategoriler
+
+
+def modelleri_karsilastir(bulanik_riskler, temel_riskler):
+    """
+    Bulanık ve temel model sonuçlarını karşılaştırır.
+    
+    Parametreler
+    ------------
+    bulanik_riskler : numpy.ndarray
+        Bulanık mantık sistemi risk çıktıları (referans/ground truth).
+    temel_riskler : numpy.ndarray
+        Temel model tahminleri.
+    
+    Döndürür
+    --------
+    metrikler : dict
+        Tüm karşılaştırma metrikleri.
+    """
+    print("\n" + "=" * 60)
+    print("MODEL KARSILASTIRMA SONUCLARI")
+    print("=" * 60)
+    
+    # Surekli metrikler
+    mse = mean_squared_error(bulanik_riskler, temel_riskler)
+    mae = mean_absolute_error(bulanik_riskler, temel_riskler)
+    korelasyon, p_deger = pearsonr(bulanik_riskler, temel_riskler)
+    
+    print(f"\n Surekli Metrikler:")
+    print(f"  MSE (Ort. Karesel Hata)   : {mse:.6f}")
+    print(f"  MAE (Ort. Mutlak Hata)    : {mae:.6f}")
+    print(f"  Pearson Korelasyonu       : {korelasyon:.6f} (p={p_deger:.2e})")
+    print(f"  RMSE (Kok Ort. Kare Hata) : {np.sqrt(mse):.6f}")
+    
+    # Kategorik metrikler
+    bulanik_kat = risk_kategorisi_belirle(bulanik_riskler)
+    temel_kat = risk_kategorisi_belirle(temel_riskler)
+    
+    dogruluk = accuracy_score(bulanik_kat, temel_kat)
+    kesinlik = precision_score(bulanik_kat, temel_kat, average='weighted', zero_division=0)
+    duyarlilik = recall_score(bulanik_kat, temel_kat, average='weighted', zero_division=0)
+    f1 = f1_score(bulanik_kat, temel_kat, average='weighted', zero_division=0)
+    
+    print(f"\n Kategorik Metrikler (Dusuk/Orta/Yuksek):")
+    print(f"  Dogruluk (Accuracy)   : {dogruluk:.4f} ({dogruluk*100:.1f}%)")
+    print(f"  Kesinlik (Precision)  : {kesinlik:.4f}")
+    print(f"  Duyarlilik (Recall)   : {duyarlilik:.4f}")
+    print(f"  F1-Skor              : {f1:.4f}")
+    
+    # Karisiklik matrisi
+    kat_isimleri = ['Dusuk', 'Orta', 'Yuksek']
+    print(f"\n Karisiklik Matrisi:")
+    km = confusion_matrix(bulanik_kat, temel_kat, labels=[0, 1, 2])
+    
+    print(f"{'':15s} {'Tahmin':^30s}")
+    print(f"{'':15s} {'Dusuk':>10s} {'Orta':>10s} {'Yuksek':>10s}")
+    for i, isim in enumerate(kat_isimleri):
+        satir = '  '.join(f'{km[i,j]:8d}' for j in range(3))
+        print(f"  Gercek {isim:7s}: {satir}")
+    
+    metrikler = {
+        'MSE': mse,
+        'MAE': mae,
+        'RMSE': np.sqrt(mse),
+        'Korelasyon': korelasyon,
+        'P_Deger': p_deger,
+        'Dogruluk': dogruluk,
+        'Kesinlik': kesinlik,
+        'Duyarlilik': duyarlilik,
+        'F1_Skor': f1,
+        'Karisiklik_Matrisi': km
+    }
+    
+    print("\n" + "=" * 60)
+    
+    return metrikler
+
+
+if __name__ == "__main__":
+    # Test
+    model = TemelModel()
+    
+    # Tek tahmin
+    test_senaryolari = [
+        (0.2, 35, 0.8, 0.9, "Yuksek Riskli"),
+        (0.9, 5, 0.1, 0.2, "Dusuk Riskli"),
+        (0.5, 20, 0.4, 0.5, "Orta Riskli"),
+    ]
+    
+    print("\n--- Tek Tahmin Testi ---")
+    for guven, paylasim, duygu, merkezlilik, aciklama in test_senaryolari:
+        risk = model.tahmin(guven, paylasim, duygu, merkezlilik)
+        print(f"  {aciklama:15s}: Risk = {risk:.4f}")
+    
+    print("\n[TEST] Temel model basariyla calisti!")
+# -*- coding: utf-8 -*-
+"""
+Veri Yukleme Modulu
+====================
+Facebook sosyal ag verisini ve islenmis CSV dosyalarini yukler.
+NetworkX graf nesnesi olusturur ve merkezlilik skorlarini hesaplar.
+"""
+
+import os
+import sys
+import gzip
+import pandas as pd
+import networkx as nx
+import numpy as np
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+
+# Proje kök dizini
+PROJE_DIZINI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VERI_DIZINI = os.path.join(PROJE_DIZINI, "data")
+HAM_VERI_DIZINI = os.path.join(VERI_DIZINI, "raw")
+ISENMIS_VERI_DIZINI = os.path.join(VERI_DIZINI, "processed")
+
+
+def dizinleri_olustur():
+    """Gerekli veri dizinlerini oluşturur."""
+    for dizin in [VERI_DIZINI, HAM_VERI_DIZINI, ISENMIS_VERI_DIZINI]:
+        os.makedirs(dizin, exist_ok=True)
+
+
+def twitter_grafini_yukle(dosya_yolu=None):
+    """
+    Twitter sosyal ağ verisini yükler ve NetworkX graf nesnesi oluşturur.
+    
+    Parametreler
+    ------------
+    dosya_yolu : str, opsiyonel
+        twitter_combined.txt.gz dosyasının yolu.
+        Belirtilmezse proje kök dizininde aranır.
+    
+    Döndürür
+    --------
+    G : networkx.Graph
+        Yönlendirilmemiş sosyal ağ grafı.
+        4039 düğüm, 88234 kenar içerir.
+    """
+    if dosya_yolu is None:
+        # Önce proje kök dizininde ara
+        dosya_yolu = os.path.join(PROJE_DIZINI, "twitter_combined.txt.gz")
+        if not os.path.exists(dosya_yolu):
+            dosya_yolu = os.path.join(HAM_VERI_DIZINI, "twitter_combined.txt.gz")
+    
+    if not os.path.exists(dosya_yolu):
+        raise FileNotFoundError(
+            f"Twitter veri dosyası bulunamadı: {dosya_yolu}\n"
+            "Lütfen 'twitter_combined.txt.gz' dosyasını proje dizinine yerleştirin."
+        )
+    
+    print(f"[VERİ] Twitter graf verisi yükleniyor: {dosya_yolu}")
+    
+    # Gzip dosyasını oku ve graf oluştur
+    G = nx.Graph()
+    with gzip.open(dosya_yolu, 'rt') as f:
+        for satir in f:
+            satirr = satir.strip()
+            if satirr and not satirr.startswith('#'):
+                parcalar = satirr.split()
+                if len(parcalar) >= 2:
+                    kaynak = int(parcalar[0])
+                    hedef = int(parcalar[1])
+                    G.add_edge(kaynak, hedef)
+    
+    print(f"[VERİ] Graf yüklendi: {G.number_of_nodes()} düğüm, {G.number_of_edges()} kenar")
+    return G
+
+
+def merkezlilik_hesapla(G):
+    """
+    Graf üzerinde merkezlilik skorlarını hesaplar.
+    
+    Parametreler
+    ------------
+    G : networkx.Graph
+        Sosyal ağ grafı.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        Her düğüm için merkezlilik skorlarını içeren DataFrame.
+        Sütunlar: dugum_id, derece_merkezliligi, arasindalik_merkezliligi, merkezlilik_skoru
+    """
+    print("[VERİ] Merkezlilik skorları hesaplanıyor...")
+    
+    # Derece merkezliliği (Degree Centrality)
+    derece = nx.degree_centrality(G)
+    
+    # Arasındalık merkezliliği (Betweenness Centrality)
+    print("[VERİ] Arasındalık merkezliliği hesaplanıyor (bu biraz zaman alabilir)...")
+    arasindalik = nx.betweenness_centrality(G, normalized=True, k=min(500, G.number_of_nodes()))
+    
+    # DataFrame oluştur
+    dugumler = list(G.nodes())
+    df = pd.DataFrame({
+        'dugum_id': dugumler,
+        'derece_merkezliligi': [derece[n] for n in dugumler],
+        'arasindalik_merkezliligi': [arasindalik[n] for n in dugumler]
+    })
+    
+    # Birleşik merkezlilik skoru: derece ve arasındalık ortalaması (normalize edilmiş)
+    # Her ikisini de [0,1] arasına normalize et
+    derece_norm = (df['derece_merkezliligi'] - df['derece_merkezliligi'].min()) / \
+                  (df['derece_merkezliligi'].max() - df['derece_merkezliligi'].min() + 1e-10)
+    arasindalik_norm = (df['arasindalik_merkezliligi'] - df['arasindalik_merkezliligi'].min()) / \
+                       (df['arasindalik_merkezliligi'].max() - df['arasindalik_merkezliligi'].min() + 1e-10)
+    
+    # Ağırlıklı birleşik skor
+    df['merkezlilik_skoru'] = 0.6 * derece_norm + 0.4 * arasindalik_norm
+    
+    # [0,1] aralığına normalize et
+    df['merkezlilik_skoru'] = df['merkezlilik_skoru'].clip(0, 1)
+    
+    print(f"[VERİ] Merkezlilik skorları hesaplandı: {len(df)} düğüm")
+    print(f"       Derece merkezliliği aralığı: [{df['derece_merkezliligi'].min():.4f}, {df['derece_merkezliligi'].max():.4f}]")
+    print(f"       Arasındalık merkezliliği aralığı: [{df['arasindalik_merkezliligi'].min():.4f}, {df['arasindalik_merkezliligi'].max():.4f}]")
+    print(f"       Birleşik skor aralığı: [{df['merkezlilik_skoru'].min():.4f}, {df['merkezlilik_skoru'].max():.4f}]")
+    
+    return df
+
+
+def islenmis_veri_yukle(dosya_adi="sentetik_veri.csv"):
+    """
+    İşlenmiş CSV verisini yükler.
+    
+    Parametreler
+    ------------
+    dosya_adi : str
+        İşlenmiş veri dosyasının adı.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        İşlenmiş veri.
+    """
+    dosya_yolu = os.path.join(ISENMIS_VERI_DIZINI, dosya_adi)
+    
+    if not os.path.exists(dosya_yolu):
+        raise FileNotFoundError(
+            f"İşlenmiş veri dosyası bulunamadı: {dosya_yolu}\n"
+            "Önce 'preprocessing.py' ile veri oluşturun."
+        )
+    
+    df = pd.read_csv(dosya_yolu)
+    print(f"[VERİ] İşlenmiş veri yüklendi: {len(df)} satır, {len(df.columns)} sütun")
+    return df
+
+
+def simulasyon_sonuclarini_yukle(dosya_adi="simulasyon_sonuclari.csv"):
+    """Simülasyon sonuçlarını yükler."""
+    dosya_yolu = os.path.join(ISENMIS_VERI_DIZINI, dosya_adi)
+    
+    if not os.path.exists(dosya_yolu):
+        raise FileNotFoundError(f"Simülasyon sonuçları bulunamadı: {dosya_yolu}")
+    
+    df = pd.read_csv(dosya_yolu)
+    print(f"[VERİ] Simülasyon sonuçları yüklendi: {len(df)} satır")
+    return df
+
+
+def veriyi_kaydet(df, dosya_adi, dizin=None):
+    """
+    DataFrame'i CSV olarak kaydeder.
+    
+    Parametreler
+    ------------
+    df : pandas.DataFrame
+        Kaydedilecek veri.
+    dosya_adi : str
+        Dosya adı.
+    dizin : str, opsiyonel
+        Hedef dizin. Belirtilmezse processed/ kullanılır.
+    """
+    if dizin is None:
+        dizin = ISENMIS_VERI_DIZINI
+    
+    os.makedirs(dizin, exist_ok=True)
+    dosya_yolu = os.path.join(dizin, dosya_adi)
+    df.to_csv(dosya_yolu, index=False)
+    print(f"[VERİ] Veri kaydedildi: {dosya_yolu} ({len(df)} satır)")
+
+
+if __name__ == "__main__":
+    # Test: Twitter grafını yükle ve merkezlilik hesapla
+    dizinleri_olustur()
+    G = twitter_grafini_yukle()
+    df_merkezlilik = merkezlilik_hesapla(G)
+    veriyi_kaydet(df_merkezlilik, "merkezlilik_skorlari.csv")
+    print("\n[TEST] Veri yükleme modülü başarıyla çalıştı!")
+# -*- coding: utf-8 -*-
+"""
+Veri On Isleme Modulu
+======================
+Sentetik veri uretimi ve on isleme fonksiyonlarini icerir.
+"""
+
+import os
+import sys
+import numpy as np
+import pandas as pd
+from scipy import stats
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+from utils.data_loader import (
+    twitter_grafini_yukle,
+    merkezlilik_hesapla,
+    veriyi_kaydet,
+    dizinleri_olustur,
+    ISENMIS_VERI_DIZINI
+)
+
+
+def sentetik_veri_uret(ornek_sayisi=1000, rastgele_tohum=42):
+    """
+    Sentetik kullanıcı verisi üretir.
+    
+    Parametreler
+    ------------
+    ornek_sayisi : int
+        Üretilecek örnek sayısı (varsayılan: 1000).
+    rastgele_tohum : int
+        Tekrarlanabilirlik için rastgele tohum değeri.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        Sentetik kullanıcı verisi.
+        Sütunlar: kullanici_id, guven_skoru, paylasim_sikligi, 
+                  duygu_sapmasi, merkezlilik_skoru
+    
+    Dağılımlar
+    ----------
+    - Güven Skoru (Trust): Uniform(0, 1)
+    - Paylaşım Sıklığı (Frequency): Poisson(λ=8), [0, 50] aralığında
+    - Duygu Sapması (Sentiment Deviation): Normal(μ=0, σ=0.35), [-1, +1] aralığında
+    - Merkezlilik Skoru (Centrality): Beta(α=2, β=5), [0, 1] aralığında
+    """
+    np.random.seed(rastgele_tohum)
+    
+    print(f"[ÖNİŞLEM] {ornek_sayisi} adet sentetik veri üretiliyor...")
+    
+    # 1. Güven Skoru: Uniform(0, 1)
+    guven = np.random.uniform(0, 1, ornek_sayisi)
+    
+    # 2. Paylaşım Sıklığı: Poisson(λ=8), maksimum 50
+    paylasim = np.random.poisson(lam=8, size=ornek_sayisi)
+    paylasim = np.clip(paylasim, 0, 50).astype(float)
+    
+    # 3. Duygu Sapması: Normal(μ=0, σ=0.35), [-1, +1] aralığında
+    duygu = np.random.normal(loc=0, scale=0.35, size=ornek_sayisi)
+    duygu = np.clip(duygu, -1, 1)
+    
+    # 4. Merkezlilik Skoru: Beta(α=2, β=5) - sağa çarpık dağılım
+    merkezlilik = np.random.beta(a=2, b=5, size=ornek_sayisi)
+    
+    df = pd.DataFrame({
+        'kullanici_id': range(1, ornek_sayisi + 1),
+        'guven_skoru': np.round(guven, 4),
+        'paylasim_sikligi': paylasim,
+        'duygu_sapmasi': np.round(duygu, 4),
+        'merkezlilik_skoru': np.round(merkezlilik, 4)
+    })
+    
+    print(f"[ÖNİŞLEM] Sentetik veri üretildi: {len(df)} örnek")
+    _veri_istatistiklerini_yazdir(df)
+    
+    return df
+
+
+def graf_merkezliligini_entegre_et(df_sentetik, df_merkezlilik):
+    """
+    Sentetik veriye gerçek graf merkezlilik skorlarını entegre eder.
+    
+    Rastgele düğümlerden merkezlilik skorları alınarak sentetik verinin
+    merkezlilik_skoru sütunu güncellenir.
+    
+    Parametreler
+    ------------
+    df_sentetik : pandas.DataFrame
+        Sentetik kullanıcı verisi.
+    df_merkezlilik : pandas.DataFrame
+        Graf merkezlilik skorları.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        Güncellenmiş sentetik veri.
+    """
+    print("[ÖNİŞLEM] Gerçek graf merkezlilik skorları entegre ediliyor...")
+    
+    # Gerçek graftan rastgele merkezlilik skorları al
+    n = len(df_sentetik)
+    gercek_skorlar = df_merkezlilik['merkezlilik_skoru'].values
+    
+    # Rastgele örnekle (tekrarlı)
+    secilen_indeksler = np.random.choice(len(gercek_skorlar), size=n, replace=True)
+    df_sentetik = df_sentetik.copy()
+    df_sentetik['merkezlilik_skoru'] = np.round(gercek_skorlar[secilen_indeksler], 4)
+    
+    # Graftan alınan düğüm ID'lerini de kaydet
+    dugum_idler = df_merkezlilik['dugum_id'].values
+    df_sentetik['graf_dugum_id'] = dugum_idler[secilen_indeksler]
+    
+    print(f"[ÖNİŞLEM] Merkezlilik skorları güncellendi")
+    print(f"       Yeni merkezlilik aralığı: [{df_sentetik['merkezlilik_skoru'].min():.4f}, "
+          f"{df_sentetik['merkezlilik_skoru'].max():.4f}]")
+    
+    return df_sentetik
+
+
+def veriyi_normalize_et(df):
+    """
+    Verideki sütunları bulanık sistem girişleri için uygun aralıklara normalize eder.
+    
+    Parametreler
+    ------------
+    df : pandas.DataFrame
+        Ham veya sentetik veri.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        Normalize edilmiş veri.
+    """
+    df = df.copy()
+    
+    # Güven skoru zaten [0,1] aralığında
+    df['guven_skoru'] = df['guven_skoru'].clip(0, 1)
+    
+    # Paylaşım sıklığı [0, 50] aralığında kalmalı
+    df['paylasim_sikligi'] = df['paylasim_sikligi'].clip(0, 50)
+    
+    # Duygu sapması [-1, +1] aralığında
+    df['duygu_sapmasi'] = df['duygu_sapmasi'].clip(-1, 1)
+    
+    # Merkezlilik skoru [0, 1] aralığında
+    df['merkezlilik_skoru'] = df['merkezlilik_skoru'].clip(0, 1)
+    
+    return df
+
+
+def tam_veri_hatti_calistir(ornek_sayisi=1000, graf_entegre=True, rastgele_tohum=42):
+    """
+    Tam veri işleme hattını çalıştırır.
+    
+    1. Sentetik veri üretir
+    2. Facebook grafından merkezlilik hesaplar (opsiyonel)
+    3. Merkezlilik skorlarını entegre eder
+    4. Normalize eder
+    5. İşlenmiş veriyi kaydeder
+    
+    Parametreler
+    ------------
+    ornek_sayisi : int
+        Üretilecek örnek sayısı.
+    graf_entegre : bool
+        True ise gerçek graf merkezlilik skorlarını kullanır.
+    rastgele_tohum : int
+        Rastgele tohum değeri.
+    
+    Döndürür
+    --------
+    df : pandas.DataFrame
+        İşlenmiş ve kaydedilmiş veri.
+    """
+    dizinleri_olustur()
+    
+    print("=" * 60)
+    print("VERİ İŞLEME HATTI BAŞLATILIYOR")
+    print("=" * 60)
+    
+    # 1. Sentetik veri üret
+    df = sentetik_veri_uret(ornek_sayisi, rastgele_tohum)
+    
+    # 2. Graf entegrasyonu
+    if graf_entegre:
+        try:
+            G = twitter_grafini_yukle()
+            df_merkezlilik = merkezlilik_hesapla(G)
+            veriyi_kaydet(df_merkezlilik, "merkezlilik_skorlari.csv")
+            
+            # 3. Merkezlilik skorlarını entegre et
+            df = graf_merkezliligini_entegre_et(df, df_merkezlilik)
+        except FileNotFoundError as e:
+            print(f"[UYARI] Graf verisi bulunamadı: {e}")
+            print("[UYARI] Sentetik merkezlilik skorları kullanılacak.")
+    
+    # 4. Normalize et
+    df = veriyi_normalize_et(df)
+    
+    # 5. Kaydet
+    veriyi_kaydet(df, "sentetik_veri.csv")
+    
+    print("\n" + "=" * 60)
+    print("VERİ İŞLEME HATTI TAMAMLANDI")
+    print("=" * 60)
+    
+    return df
+
+
+def _veri_istatistiklerini_yazdir(df):
+    """Veri istatistiklerini konsola yazdırır."""
+    sayisal_sutunlar = ['guven_skoru', 'paylasim_sikligi', 'duygu_sapmasi', 'merkezlilik_skoru']
+    mevcut_sutunlar = [s for s in sayisal_sutunlar if s in df.columns]
+    
+    print("\n  --- Veri İstatistikleri ---")
+    for sutun in mevcut_sutunlar:
+        print(f"  {sutun:25s}: min={df[sutun].min():8.4f}, "
+              f"ort={df[sutun].mean():8.4f}, "
+              f"max={df[sutun].max():8.4f}, "
+              f"std={df[sutun].std():8.4f}")
+    print()
+
+
+if __name__ == "__main__":
+    df = tam_veri_hatti_calistir(ornek_sayisi=1000, graf_entegre=True)
+    print("\n[TEST] Veri ön işleme modülü başarıyla çalıştı!")
+    print(df.head(10).to_string())
+# -*- coding: utf-8 -*-
+"""
+Matematiksel Formül Oluşturucu (LaTeX)
+=====================================
+Bulanık mantık üyelik fonksiyonları için parçalı matematik (piecewise) 
+fonksiyonların LaTeX kodlarını üretir ve Matplotlib kullanarak
+siyah arkaplanlı formül resimleri (PNG) olarak kaydeder.
+"""
+
+import os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Matplotlib varsayılan font ayarları
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['mathtext.fontset'] = 'cm' # Computer Modern (Standart LaTeX fontu)
+
+def get_trimf_latex(symbol, a, b, c, for_matplotlib=False):
+    """Üçgensel üyelik fonksiyonu için LaTeX stringi üretir."""
+    def fmt(val):
+        return f"{val:g}"
+        
+    lines = []
+    
+    if a == b:
+        # Sadece sağ düşen omuz
+        lines.append(rf"1 & x \le {fmt(a)}")
+        lines.append(rf"\frac{{{fmt(c)} - x}}{{{fmt(c-b)}}} & {fmt(b)} < x \le {fmt(c)}")
+        lines.append(rf"0 & x > {fmt(c)}")
+    elif b == c:
+        # Sadece sol çıkan omuz
+        lines.append(rf"0 & x \le {fmt(a)}")
+        lines.append(rf"\frac{{x - {fmt(a)}}}{{{fmt(b-a)}}} & {fmt(a)} < x \le {fmt(b)}")
+        lines.append(rf"1 & x > {fmt(b)}")
+    else:
+        # Normal üçgen
+        lines.append(rf"0 & x \le {fmt(a)}")
+        lines.append(rf"\frac{{x - {fmt(a)}}}{{{fmt(b-a)}}} & {fmt(a)} < x \le {fmt(b)}")
+        lines.append(rf"\frac{{{fmt(c)} - x}}{{{fmt(c-b)}}} & {fmt(b)} < x \le {fmt(c)}")
+        lines.append(rf"0 & x > {fmt(c)}")
+        
+    if for_matplotlib:
+        cases_str = " \\\\ \n".join(lines)
+        latex_str = rf"$\mu_{{{symbol}}}(x) = \left\{{ \begin{{array}}{{ll}} {cases_str} \end{{array}} \right.$"
+    else:
+        cases_str = " \\\\ \n".join(lines)
+        latex_str = rf"\mu_{{{symbol}}}(x) = \begin{{cases}} {cases_str} \end{{cases}}"
+        
+    return latex_str
+
+
+def get_trapmf_latex(symbol, a, b, c, d, for_matplotlib=False):
+    """Yamuksal üyelik fonksiyonu için LaTeX stringi üretir."""
+    def fmt(val):
+        return f"{val:g}"
+        
+    lines = []
+    
+    if a == b and c == d:
+        # Kesin aralık
+        lines.append(rf"1 & {fmt(a)} \le x \le {fmt(c)}")
+        lines.append(rf"0 & \text{{diğer}}")
+        
+    elif a == b: 
+        # Sol omuz (Baştan 1 başlar)
+        lines.append(rf"1 & x \le {fmt(c)}")
+        lines.append(rf"\frac{{{fmt(d)} - x}}{{{fmt(d-c)}}} & {fmt(c)} < x \le {fmt(d)}")
+        lines.append(rf"0 & x > {fmt(d)}")
+        
+    elif c == d: 
+        # Sağ omuz (Sonda 1 olarak kalır)
+        lines.append(rf"0 & x \le {fmt(a)}")
+        lines.append(rf"\frac{{x - {fmt(a)}}}{{{fmt(b-a)}}} & {fmt(a)} < x \le {fmt(b)}")
+        lines.append(rf"1 & x > {fmt(b)}")
+        
+    else: 
+        # Normal yamuk
+        lines.append(rf"0 & x \le {fmt(a)}")
+        lines.append(rf"\frac{{x - {fmt(a)}}}{{{fmt(b-a)}}} & {fmt(a)} < x \le {fmt(b)}")
+        lines.append(rf"1 & {fmt(b)} < x \le {fmt(c)}")
+        lines.append(rf"\frac{{{fmt(d)} - x}}{{{fmt(d-c)}}} & {fmt(c)} < x \le {fmt(d)}")
+        lines.append(rf"0 & x > {fmt(d)}")
+
+    if for_matplotlib:
+        cases_str = " \\\\ \n".join(lines)
+        latex_str = rf"$\mu_{{{symbol}}}(x) = \left\{{ \begin{{array}}{{ll}} {cases_str} \end{{array}} \right.$"
+    else:
+        cases_str = " \\\\ \n".join(lines)
+        latex_str = rf"\mu_{{{symbol}}}(x) = \begin{{cases}} {cases_str} \end{{cases}}"
+        
+    return latex_str
+
+
+def save_formula_image(latex_str, label_text, file_path):
+    """
+    Siyah arkaplanlı matematiksel formül resmi üretir.
+    Gönderdiğiniz örnek resim stiline (%100 benzetilmiş) göre tasarlandı.
+    """
+    fig = plt.figure(figsize=(10, 4), facecolor='#111111')
+    ax = fig.add_axes([0, 0, 1, 1])
+    ax.axis('off')
+    ax.set_facecolor('#111111')
+    
+    # Sol üste başlık (Örn: "Düşük (Yamuk Fonksiyon - trap(0, 0, 25, 45)):")
+    ax.text(0.05, 0.85, label_text, color='white', fontsize=18, fontweight='bold',
+            transform=ax.transAxes, ha='left', va='center')
+    
+    # Ortaya formül
+    ax.text(0.65, 0.4, latex_str, color='white', fontsize=26,
+            transform=ax.transAxes, ha='center', va='center')
+    
+    # Klasör yoksa oluştur
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    
+    plt.savefig(file_path, facecolor=fig.get_facecolor(), edgecolor='none', 
+                dpi=200, bbox_inches='tight', pad_inches=0.3)
+    plt.close()
+
+
+def tum_formulleri_uret(cikti_dizini=None):
+    """
+    Sistemdeki değişkenlerin formül resimlerini üretir.
+    """
+    if cikti_dizini is None:
+        cikti_dizini = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "output", "formulas"
+        )
+        
+    os.makedirs(cikti_dizini, exist_ok=True)
+    print(f"[FORMÜLLER] Resimler {cikti_dizini} dizinine üretiliyor...")
+    
+    # Tanımlar (BulanikCikarimSistemi - karisik tipe gore)
+    # GUVEN SKORU
+    # Dusuk: trapmf(0, 0, 0.15, 0.4)
+    # Orta: trimf(0.2, 0.5, 0.8)
+    # Yuksek: trapmf(0.6, 0.85, 1, 1)
+    # Sembol: G
+    
+    save_formula_image(
+        get_trapmf_latex('G', 0, 0, 0.15, 0.4, for_matplotlib=True),
+        "Güven Düşük (Yamuk Fonksiyon - trap(0, 0, 0.15, 0.4)):",
+        os.path.join(cikti_dizini, "guven_dusuk.png")
+    )
+    save_formula_image(
+        get_trimf_latex('G', 0.2, 0.5, 0.8, for_matplotlib=True),
+        "Güven Orta (Üçgen Fonksiyon - tri(0.2, 0.5, 0.8)):",
+        os.path.join(cikti_dizini, "guven_orta.png")
+    )
+    save_formula_image(
+        get_trapmf_latex('G', 0.6, 0.85, 1, 1, for_matplotlib=True),
+        "Güven Yüksek (Yamuk Fonksiyon - trap(0.6, 0.85, 1, 1)):",
+        os.path.join(cikti_dizini, "guven_yuksek.png")
+    )
+    
+    # PAYLASIM SIKLIGI
+    # Sembol: P
+    save_formula_image(
+        get_trapmf_latex('P', 0, 0, 5, 15, for_matplotlib=True),
+        "Paylaşım Düşük (Yamuk Fonksiyon - trap(0, 0, 5, 15)):",
+        os.path.join(cikti_dizini, "paylasim_dusuk.png")
+    )
+    save_formula_image(
+        get_trimf_latex('P', 8, 20, 35, for_matplotlib=True),
+        "Paylaşım Orta (Üçgen Fonksiyon - tri(8, 20, 35)):",
+        os.path.join(cikti_dizini, "paylasim_orta.png")
+    )
+    save_formula_image(
+        get_trapmf_latex('P', 25, 40, 50, 50, for_matplotlib=True),
+        "Paylaşım Yüksek (Yamuk Fonksiyon - trap(25, 40, 50, 50)):",
+        os.path.join(cikti_dizini, "paylasim_yuksek.png")
+    )
+
+    # DUYGU SAPMASI
+    # Sembol: D
+    save_formula_image(
+        get_trapmf_latex('S', -1, -1, -0.6, -0.3, for_matplotlib=True),
+        "Duygu Negatif Değişken (Yamuk - trap(-1, -1, -0.6, -0.3)):",
+        os.path.join(cikti_dizini, "duygu_neg_degisken.png")
+    )
+    # Karisik tipteki Duygu tanimini baz alarak:
+    save_formula_image(
+        get_trapmf_latex('S', -0.3, -0.1, 0.1, 0.3, for_matplotlib=True),
+        "Duygu Kararlı (Yamuk - trap(-0.3, -0.1, 0.1, 0.3)):",
+        os.path.join(cikti_dizini, "duygu_kararli.png")
+    )
+    
+    # MERKEZLILIK
+    # Sembol: C
+    save_formula_image(
+        get_trapmf_latex('C', 0, 0, 0.15, 0.4, for_matplotlib=True),
+        "Merkezlilik Düşük (Yamuk - trap(0, 0, 0.15, 0.4)):",
+        os.path.join(cikti_dizini, "merkezlilik_dusuk.png")
+    )
+    save_formula_image(
+        get_trimf_latex('C', 0.2, 0.5, 0.8, for_matplotlib=True),
+        "Merkezlilik Orta (Üçgen - tri(0.2, 0.5, 0.8)):",
+        os.path.join(cikti_dizini, "merkezlilik_orta.png")
+    )
+    save_formula_image(
+        get_trapmf_latex('C', 0.6, 0.85, 1, 1, for_matplotlib=True),
+        "Merkezlilik Yüksek (Yamuk - trap(0.6, 0.85, 1, 1)):",
+        os.path.join(cikti_dizini, "merkezlilik_yuksek.png")
+    )
+    
+    print("[FORMÜLLER] Tüm resimler başarıyla oluşturuldu!")
+
+
+if __name__ == "__main__":
+    tum_formulleri_uret()
+# -*- coding: utf-8 -*-
+"""
+Görselleştirme Modülü
+======================
+Bulanık mantık sistemi için tüm grafik ve görsel çıktıları üretir.
+
+Üretilen Grafikler
+-------------------
+1. Üyelik fonksiyonu grafikleri
+2. 3D yüzey grafikleri (surface plot)
+3. Isı haritaları (heatmap)
+4. Risk dağılımı histogramı
+5. Giriş-çıkış örnekleri
+6. Duyarlılık analizi grafikleri
+7. Model karşılaştırma grafikleri
+8. Kural aktivasyon diyagramları
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+import seaborn as sns
+
+# Matplotlib Türkçe karakter desteği
+plt.rcParams['font.family'] = 'DejaVu Sans'
+plt.rcParams['axes.unicode_minus'] = False
+
+# Seaborn stili
+sns.set_style("whitegrid")
+sns.set_palette("husl")
+
+# Varsayılan çıktı dizini
+CIKTI_DIZINI = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "visualization", "output"
+)
+
+
+def _dizin_kontrol(kaydet_yolu):
+    """Dosya yolunun dizinini oluşturur."""
+    if kaydet_yolu:
+        os.makedirs(os.path.dirname(kaydet_yolu), exist_ok=True)
+
+
+def yuzey_grafigi_3d(fis, degisken1='guven_skoru', degisken2='paylasim_sikligi',
+                     sabit_degerler=None, cozunurluk=30, kaydet_yolu=None):
+    """
+    İki giriş değişkeni için 3D yüzey grafiği oluşturur.
+    
+    Parametreler
+    ------------
+    fis : BulanikCikarimSistemi
+        Bulanık çıkarım sistemi nesnesi.
+    degisken1, degisken2 : str
+        X ve Y eksenlerindeki değişken adları.
+    sabit_degerler : dict, opsiyonel
+        Sabit tutulan diğer değişkenlerin değerleri.
+    cozunurluk : int
+        Her eksen için nokta sayısı.
+    kaydet_yolu : str, opsiyonel
+        Grafik dosyasının kaydedileceği yol.
+    """
+    if sabit_degerler is None:
+        sabit_degerler = {
+            'guven_skoru': 0.5,
+            'paylasim_sikligi': 20,
+            'duygu_sapmasi': 0.3,
+            'merkezlilik_skoru': 0.5
+        }
+    
+    # Değişken aralıkları
+    araliklar = {
+        'guven_skoru': (0, 1),
+        'paylasim_sikligi': (0, 50),
+        'duygu_sapmasi': (-1, 1),
+        'merkezlilik_skoru': (0, 1)
+    }
+    
+    turkce_isimler = {
+        'guven_skoru': 'Güven Skoru',
+        'paylasim_sikligi': 'Paylaşım Sıklığı',
+        'duygu_sapmasi': 'Duygu Sapması',
+        'merkezlilik_skoru': 'Merkezlilik Skoru'
+    }
+    
+    x_aralik = araliklar[degisken1]
+    y_aralik = araliklar[degisken2]
+    
+    x = np.linspace(x_aralik[0], x_aralik[1], cozunurluk)
+    y = np.linspace(y_aralik[0], y_aralik[1], cozunurluk)
+    X, Y = np.meshgrid(x, y)
+    Z = np.zeros_like(X)
+    
+    print(f"[GÖRSELLEŞTİRME] 3D yüzey grafiği oluşturuluyor: "
+          f"{turkce_isimler[degisken1]} vs {turkce_isimler[degisken2]}...")
+    
+    for i in range(cozunurluk):
+        for j in range(cozunurluk):
+            girisler = sabit_degerler.copy()
+            girisler[degisken1] = X[i, j]
+            girisler[degisken2] = Y[i, j]
+            
+            Z[i, j] = fis.hesapla(
+                guven=girisler['guven_skoru'],
+                paylasim=girisler['paylasim_sikligi'],
+                duygu=girisler['duygu_sapmasi'],
+                merkezlilik=girisler['merkezlilik_skoru']
+            )
+    
+    # 3D grafik
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    surf = ax.plot_surface(X, Y, Z, cmap='RdYlGn_r', alpha=0.85,
+                          edgecolor='none', antialiased=True)
+    
+    ax.set_xlabel(turkce_isimler[degisken1], fontsize=11, labelpad=10)
+    ax.set_ylabel(turkce_isimler[degisken2], fontsize=11, labelpad=10)
+    ax.set_zlabel('Risk Seviyesi', fontsize=11, labelpad=10)
+    ax.set_title(f'Yanlış Bilgi Risk Yüzeyi\n{turkce_isimler[degisken1]} vs {turkce_isimler[degisken2]}',
+                fontsize=13, fontweight='bold', pad=20)
+    
+    fig.colorbar(surf, ax=ax, shrink=0.6, label='Risk Seviyesi')
+    ax.view_init(elev=25, azim=45)
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] 3D grafik kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def isi_haritasi(fis, degisken1='guven_skoru', degisken2='merkezlilik_skoru',
+                 sabit_degerler=None, cozunurluk=40, kaydet_yolu=None):
+    """
+    İki giriş değişkeni için ısı haritası oluşturur.
+    
+    Parametreler
+    ------------
+    fis : BulanikCikarimSistemi
+    degisken1, degisken2 : str
+    sabit_degerler : dict
+    cozunurluk : int
+    kaydet_yolu : str
+    """
+    if sabit_degerler is None:
+        sabit_degerler = {
+            'guven_skoru': 0.5,
+            'paylasim_sikligi': 20,
+            'duygu_sapmasi': 0.3,
+            'merkezlilik_skoru': 0.5
+        }
+    
+    araliklar = {
+        'guven_skoru': (0, 1),
+        'paylasim_sikligi': (0, 50),
+        'duygu_sapmasi': (-1, 1),
+        'merkezlilik_skoru': (0, 1)
+    }
+    
+    turkce_isimler = {
+        'guven_skoru': 'Güven Skoru',
+        'paylasim_sikligi': 'Paylaşım Sıklığı',
+        'duygu_sapmasi': 'Duygu Sapması',
+        'merkezlilik_skoru': 'Merkezlilik Skoru'
+    }
+    
+    x_aralik = araliklar[degisken1]
+    y_aralik = araliklar[degisken2]
+    
+    x = np.linspace(x_aralik[0], x_aralik[1], cozunurluk)
+    y = np.linspace(y_aralik[0], y_aralik[1], cozunurluk)
+    Z = np.zeros((len(y), len(x)))
+    
+    print(f"[GÖRSELLEŞTİRME] Isı haritası oluşturuluyor: "
+          f"{turkce_isimler[degisken1]} vs {turkce_isimler[degisken2]}...")
+    
+    for i in range(len(y)):
+        for j in range(len(x)):
+            girisler = sabit_degerler.copy()
+            girisler[degisken1] = x[j]
+            girisler[degisken2] = y[i]
+            
+            Z[i, j] = fis.hesapla(
+                guven=girisler['guven_skoru'],
+                paylasim=girisler['paylasim_sikligi'],
+                duygu=girisler['duygu_sapmasi'],
+                merkezlilik=girisler['merkezlilik_skoru']
+            )
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    im = ax.imshow(Z, extent=[x_aralik[0], x_aralik[1], y_aralik[0], y_aralik[1]],
+                   origin='lower', cmap='RdYlGn_r', aspect='auto', interpolation='bilinear')
+    
+    plt.colorbar(im, ax=ax, label='Risk Seviyesi')
+    
+    ax.set_xlabel(turkce_isimler[degisken1], fontsize=12)
+    ax.set_ylabel(turkce_isimler[degisken2], fontsize=12)
+    ax.set_title(f'Risk Isı Haritası\n{turkce_isimler[degisken1]} vs {turkce_isimler[degisken2]}',
+                fontsize=13, fontweight='bold')
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Isı haritası kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def risk_dagilimi(risk_degerleri, baslik="Yanlış Bilgi Risk Dağılımı", kaydet_yolu=None):
+    """
+    Risk değerlerinin dağılımını histogram ve KDE ile gösterir.
+    
+    Parametreler
+    ------------
+    risk_degerleri : numpy.ndarray
+        Risk değerleri.
+    baslik : str
+        Grafik başlığı.
+    kaydet_yolu : str
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Histogram + KDE
+    ax1 = axes[0]
+    ax1.hist(risk_degerleri, bins=40, density=True, alpha=0.6, color='#3498db',
+            edgecolor='white', label='Histogram')
+    
+    # KDE çizgisi
+    from scipy.stats import gaussian_kde
+    kde = gaussian_kde(risk_degerleri)
+    x_kde = np.linspace(0, 1, 200)
+    ax1.plot(x_kde, kde(x_kde), 'r-', linewidth=2.5, label='KDE')
+    
+    # Bölge renklendirme
+    ax1.axvspan(0, 0.35, alpha=0.1, color='green', label='Düşük Risk')
+    ax1.axvspan(0.35, 0.65, alpha=0.1, color='orange', label='Orta Risk')
+    ax1.axvspan(0.65, 1, alpha=0.1, color='red', label='Yüksek Risk')
+    
+    ax1.set_xlabel('Risk Seviyesi', fontsize=11)
+    ax1.set_ylabel('Yoğunluk', fontsize=11)
+    ax1.set_title(baslik, fontsize=13, fontweight='bold')
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.3)
+    
+    # Kutu grafiği (Box Plot)
+    ax2 = axes[1]
+    bp = ax2.boxplot(risk_degerleri, vert=True, widths=0.5,
+                    patch_artist=True, 
+                    boxprops=dict(facecolor='#3498db', alpha=0.6),
+                    medianprops=dict(color='red', linewidth=2))
+    
+    ax2.set_ylabel('Risk Seviyesi', fontsize=11)
+    ax2.set_title('Risk Kutu Grafiği', fontsize=13, fontweight='bold')
+    ax2.grid(True, alpha=0.3)
+    
+    # İstatistikler
+    istatistik_metin = (
+        f"n = {len(risk_degerleri)}\n"
+        f"Ort = {np.mean(risk_degerleri):.3f}\n"
+        f"Std = {np.std(risk_degerleri):.3f}\n"
+        f"Min = {np.min(risk_degerleri):.3f}\n"
+        f"Max = {np.max(risk_degerleri):.3f}"
+    )
+    ax2.text(1.3, np.median(risk_degerleri), istatistik_metin,
+            fontsize=9, verticalalignment='center',
+            bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Risk dağılımı kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def giris_cikis_ornekleri(fis, kaydet_yolu=None):
+    """
+    Çeşitli giriş senaryoları ve çıktıları gösteren grafik oluşturur.
+    """
+    senaryolar = [
+        {'ad': 'Güvenilir Pasif', 'guven': 0.9, 'paylasim': 5, 'duygu': 0.1, 'merkezlilik': 0.2},
+        {'ad': 'Güvenilmez Aktif', 'guven': 0.1, 'paylasim': 40, 'duygu': 0.8, 'merkezlilik': 0.7},
+        {'ad': 'Ortalama Kullanıcı', 'guven': 0.5, 'paylasim': 15, 'duygu': 0.3, 'merkezlilik': 0.5},
+        {'ad': 'Etki Merkezi', 'guven': 0.7, 'paylasim': 30, 'duygu': 0.2, 'merkezlilik': 0.9},
+        {'ad': 'Trol Hesap', 'guven': 0.05, 'paylasim': 48, 'duygu': 0.95, 'merkezlilik': 0.6},
+        {'ad': 'Sessiz Güvenilir', 'guven': 0.95, 'paylasim': 2, 'duygu': 0.05, 'merkezlilik': 0.1},
+        {'ad': 'Duygusal Paylaşımcı', 'guven': 0.4, 'paylasim': 25, 'duygu': 0.85, 'merkezlilik': 0.4},
+        {'ad': 'Süper Yayıcı', 'guven': 0.15, 'paylasim': 45, 'duygu': 0.7, 'merkezlilik': 0.95},
+    ]
+    
+    isimler = []
+    riskler = []
+    renkler = []
+    
+    for s in senaryolar:
+        risk = fis.hesapla(s['guven'], s['paylasim'], s['duygu'], s['merkezlilik'])
+        isimler.append(s['ad'])
+        riskler.append(risk)
+        
+        if risk < 0.35:
+            renkler.append('#2ecc71')
+        elif risk < 0.65:
+            renkler.append('#f39c12')
+        else:
+            renkler.append('#e74c3c')
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    y_pos = np.arange(len(isimler))
+    bars = ax.barh(y_pos, riskler, color=renkler, edgecolor='white', height=0.6)
+    
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(isimler, fontsize=10)
+    ax.set_xlabel('Risk Seviyesi', fontsize=12)
+    ax.set_title('Kullanıcı Profili Senaryoları ve Risk Seviyeleri',
+                fontsize=13, fontweight='bold')
+    ax.set_xlim(0, 1)
+    
+    # Bölge çizgileri
+    ax.axvline(x=0.35, color='green', linestyle='--', alpha=0.5, label='Düşük/Orta sınır')
+    ax.axvline(x=0.65, color='red', linestyle='--', alpha=0.5, label='Orta/Yüksek sınır')
+    
+    # Risk değerlerini barların üzerine yaz
+    for bar, risk in zip(bars, riskler):
+        ax.text(bar.get_width() + 0.02, bar.get_y() + bar.get_height()/2,
+               f'{risk:.3f}', va='center', fontsize=10, fontweight='bold')
+    
+    ax.legend(loc='lower right', fontsize=9)
+    ax.grid(True, axis='x', alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Giriş-çıkış örnekleri kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def duyarlilik_grafikleri(fis, kaydet_yolu=None):
+    """
+    Tek değişken duyarlılık analizi grafikleri oluşturur.
+    Her değişken tek tek değiştirilirken diğerleri sabit tutulur.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Duyarlılık Analizi: Tek Değişken Etkisi',
+                fontsize=14, fontweight='bold', y=1.02)
+    
+    sabit = {'guven': 0.5, 'paylasim': 20, 'duygu': 0.3, 'merkezlilik': 0.5}
+    n_nokta = 100
+    
+    # 1. Güven Skoru Etkisi
+    ax = axes[0, 0]
+    x = np.linspace(0, 1, n_nokta)
+    y = [fis.hesapla(xi, sabit['paylasim'], sabit['duygu'], sabit['merkezlilik']) for xi in x]
+    ax.plot(x, y, 'b-', linewidth=2.5, color='#2980b9')
+    ax.fill_between(x, y, alpha=0.15, color='#2980b9')
+    ax.set_xlabel('Güven Skoru', fontsize=11)
+    ax.set_ylabel('Risk Seviyesi', fontsize=11)
+    ax.set_title('Güven ↑ → Risk ?', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    
+    # 2. Paylaşım Sıklığı Etkisi (farklı güven seviyeleri)
+    ax = axes[0, 1]
+    x = np.linspace(0, 50, n_nokta)
+    for guven_degeri, renk, etiket in [(0.2, '#e74c3c', 'Düşük Güven (0.2)'),
+                                         (0.5, '#f39c12', 'Orta Güven (0.5)'),
+                                         (0.8, '#2ecc71', 'Yüksek Güven (0.8)')]:
+        y = [fis.hesapla(guven_degeri, xi, sabit['duygu'], sabit['merkezlilik']) for xi in x]
+        ax.plot(x, y, linewidth=2, color=renk, label=etiket)
+    
+    ax.set_xlabel('Paylaşım Sıklığı (gönderi/gün)', fontsize=11)
+    ax.set_ylabel('Risk Seviyesi', fontsize=11)
+    ax.set_title('Sabit Güven → Paylaşım Etkisi', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    
+    # 3. Duygu Sapması Etkisi
+    ax = axes[1, 0]
+    x = np.linspace(-1, 1, n_nokta)
+    y = [fis.hesapla(sabit['guven'], sabit['paylasim'], xi, sabit['merkezlilik']) for xi in x]
+    ax.plot(x, y, 'r-', linewidth=2.5, color='#c0392b')
+    ax.fill_between(x, y, alpha=0.15, color='#c0392b')
+    ax.set_xlabel('Duygu Sapması', fontsize=11)
+    ax.set_ylabel('Risk Seviyesi', fontsize=11)
+    ax.set_title('Duygu Değişkenliği → Risk ?', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    
+    # 4. Merkezlilik Skoru Etkisi
+    ax = axes[1, 1]
+    x = np.linspace(0, 1, n_nokta)
+    y = [fis.hesapla(sabit['guven'], sabit['paylasim'], sabit['duygu'], xi) for xi in x]
+    ax.plot(x, y, 'g-', linewidth=2.5, color='#27ae60')
+    ax.fill_between(x, y, alpha=0.15, color='#27ae60')
+    ax.set_xlabel('Merkezlilik Skoru', fontsize=11)
+    ax.set_ylabel('Risk Seviyesi', fontsize=11)
+    ax.set_title('Merkezlilik ↑ → Risk ?', fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(0, 1)
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Duyarlılık grafikleri kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def karsilastirma_grafikleri(bulanik_riskler, temel_riskler, metrikler, kaydet_yolu=None):
+    """
+    Bulanık model ve temel model karşılaştırma grafikleri oluşturur.
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('Bulanık Mantık vs Temel Model Karşılaştırması',
+                fontsize=14, fontweight='bold', y=1.02)
+    
+    # 1. Scatter plot
+    ax = axes[0, 0]
+    ax.scatter(bulanik_riskler, temel_riskler, alpha=0.3, s=10, color='#3498db')
+    ax.plot([0, 1], [0, 1], 'r--', linewidth=1.5, label='Mükemmel eşleşme')
+    ax.set_xlabel('Bulanık Mantık Riski', fontsize=11)
+    ax.set_ylabel('Temel Model Riski', fontsize=11)
+    ax.set_title(f'Tahmin Karşılaştırması (r={metrikler["Korelasyon"]:.3f})',
+                fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    
+    # 2. Fark dağılımı
+    ax = axes[0, 1]
+    farklar = bulanik_riskler - temel_riskler
+    ax.hist(farklar, bins=40, density=True, alpha=0.6, color='#9b59b6', edgecolor='white')
+    ax.axvline(x=0, color='red', linestyle='--', linewidth=1.5)
+    ax.set_xlabel('Fark (Bulanık - Temel)', fontsize=11)
+    ax.set_ylabel('Yoğunluk', fontsize=11)
+    ax.set_title(f'Tahmin Farkları Dağılımı (MAE={metrikler["MAE"]:.4f})',
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    
+    # 3. Metrik karşılaştırma bar grafiği
+    ax = axes[1, 0]
+    metrik_isimleri = ['Doğruluk', 'Kesinlik', 'Duyarlılık', 'F1-Skor']
+    metrik_degerleri = [
+        metrikler['Dogruluk'],
+        metrikler['Kesinlik'],
+        metrikler['Duyarlilik'],
+        metrikler['F1_Skor']
+    ]
+    
+    renkler = ['#2ecc71', '#3498db', '#e67e22', '#e74c3c']
+    bars = ax.bar(metrik_isimleri, metrik_degerleri, color=renkler, 
+                 edgecolor='white', width=0.6)
+    
+    for bar, deger in zip(bars, metrik_degerleri):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+               f'{deger:.3f}', ha='center', fontsize=10, fontweight='bold')
+    
+    ax.set_ylabel('Değer', fontsize=11)
+    ax.set_title('Kategorik Performans Metrikleri', fontsize=12, fontweight='bold')
+    ax.set_ylim(0, 1.15)
+    ax.grid(True, axis='y', alpha=0.3)
+    
+    # 4. Karışıklık matrisi ısı haritası
+    ax = axes[1, 1]
+    km = metrikler['Karisiklik_Matrisi']
+    kat_isimleri = ['Düşük', 'Orta', 'Yüksek']
+    
+    sns.heatmap(km, annot=True, fmt='d', cmap='Blues', ax=ax,
+               xticklabels=kat_isimleri, yticklabels=kat_isimleri)
+    ax.set_xlabel('Temel Model Tahmini', fontsize=11)
+    ax.set_ylabel('Bulanık Mantık (Gerçek)', fontsize=11)
+    ax.set_title('Karışıklık Matrisi', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Karşılaştırma grafikleri kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def kural_aktivasyon_diyagrami(fis, guven, paylasim, duygu, merkezlilik, kaydet_yolu=None):
+    """
+    Belirli girişler için kural aktivasyon diyagramı oluşturur.
+    """
+    uyelikler = fis.kural_ateslemelerini_al(guven, paylasim, duygu, merkezlilik)
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f'Kural Aktivasyon Diyagramı\n'
+                f'(g={guven:.2f}, p={paylasim:.0f}, d={duygu:.2f}, m={merkezlilik:.2f})',
+                fontsize=14, fontweight='bold', y=1.02)
+    
+    turkce_degiskenler = {
+        'guven': ('Güven Skoru', guven),
+        'paylasim': ('Paylaşım Sıklığı', paylasim),
+        'duygu': ('Duygu Sapması', duygu),
+        'merkezlilik': ('Merkezlilik Skoru', merkezlilik)
+    }
+    
+    renkler = {'dusuk': '#2ecc71', 'orta': '#f39c12', 'yuksek': '#e74c3c',
+               'kararli': '#2ecc71', 'degisken': '#e74c3c'}
+    
+    turkce_terimler = {
+        'dusuk': 'Düşük', 'orta': 'Orta', 'yuksek': 'Yüksek',
+        'kararli': 'Kararlı', 'degisken': 'Değişken'
+    }
+    
+    for idx, (deg_adi, terimler) in enumerate(uyelikler.items()):
+        satir, sutun = divmod(idx, 2)
+        ax = axes[satir, sutun]
+        
+        isim, deger = turkce_degiskenler[deg_adi]
+        
+        terim_isimleri = [turkce_terimler.get(t, t) for t in terimler.keys()]
+        degerler = list(terimler.values())
+        bar_renkleri = [renkler.get(t, '#3498db') for t in terimler.keys()]
+        
+        bars = ax.bar(terim_isimleri, degerler, color=bar_renkleri, 
+                     edgecolor='white', width=0.5)
+        
+        for bar, d in zip(bars, degerler):
+            if d > 0.01:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                       f'{d:.3f}', ha='center', fontsize=10, fontweight='bold')
+        
+        ax.set_title(f'{isim} = {deger:.2f}', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Üyelik Derecesi μ(x)', fontsize=10)
+        ax.set_ylim(0, 1.15)
+        ax.grid(True, axis='y', alpha=0.3)
+    
+    plt.tight_layout()
+    
+    if kaydet_yolu:
+        _dizin_kontrol(kaydet_yolu)
+        plt.savefig(kaydet_yolu, dpi=150, bbox_inches='tight')
+        print(f"[GÖRSELLEŞTİRME] Kural aktivasyon diyagramı kaydedildi: {kaydet_yolu}")
+    
+    plt.close()
+    return fig
+
+
+def tum_grafikleri_uret(fis, risk_degerleri=None, bulanik_riskler=None,
+                        temel_riskler=None, metrikler=None, cikti_dizini=None):
+    """
+    Tüm grafikleri üretir ve kaydeder.
+    
+    Parametreler
+    ------------
+    fis : BulanikCikarimSistemi
+    risk_degerleri : numpy.ndarray
+    bulanik_riskler : numpy.ndarray
+    temel_riskler : numpy.ndarray
+    metrikler : dict
+    cikti_dizini : str
+    """
+    if cikti_dizini is None:
+        cikti_dizini = CIKTI_DIZINI
+    
+    os.makedirs(cikti_dizini, exist_ok=True)
+    
+    print("\n" + "=" * 60)
+    print("TÜM GRAFİKLER ÜRETİLİYOR")
+    print("=" * 60)
+    
+    # 1. Üyelik fonksiyonları
+    from fuzzy_system.membership import uyelik_fonksiyonlarini_ciz, uyelik_tiplerini_karsilastir
+    uyelik_fonksiyonlarini_ciz(
+        fis.degiskenler,
+        os.path.join(cikti_dizini, "01_uyelik_fonksiyonlari.png")
+    )
+    
+    # 2. Üyelik tipi karşılaştırması
+    uyelik_tiplerini_karsilastir(
+        os.path.join(cikti_dizini, "02_uyelik_tipi_karsilastirmasi.png")
+    )
+    
+    # 3. 3D yüzey grafikleri
+    yuzey_ciftleri = [
+        ('guven_skoru', 'paylasim_sikligi'),
+        ('guven_skoru', 'merkezlilik_skoru'),
+        ('paylasim_sikligi', 'merkezlilik_skoru'),
+    ]
+    
+    for i, (d1, d2) in enumerate(yuzey_ciftleri, 1):
+        yuzey_grafigi_3d(
+            fis, d1, d2,
+            kaydet_yolu=os.path.join(cikti_dizini, f"03_yuzey_3d_{i}.png")
+        )
+    
+    # 4. Isı haritaları
+    isi_ciftleri = [
+        ('guven_skoru', 'merkezlilik_skoru'),
+        ('guven_skoru', 'paylasim_sikligi'),
+    ]
+    
+    for i, (d1, d2) in enumerate(isi_ciftleri, 1):
+        isi_haritasi(
+            fis, d1, d2,
+            kaydet_yolu=os.path.join(cikti_dizini, f"04_isi_haritasi_{i}.png")
+        )
+    
+    # 5. Risk dağılımı
+    if risk_degerleri is not None:
+        risk_dagilimi(
+            risk_degerleri,
+            kaydet_yolu=os.path.join(cikti_dizini, "05_risk_dagilimi.png")
+        )
+    
+    # 6. Giriş-çıkış örnekleri
+    giris_cikis_ornekleri(
+        fis,
+        kaydet_yolu=os.path.join(cikti_dizini, "06_giris_cikis_ornekleri.png")
+    )
+    
+    # 7. Duyarlılık grafikleri
+    duyarlilik_grafikleri(
+        fis,
+        kaydet_yolu=os.path.join(cikti_dizini, "07_duyarlilik_analizi.png")
+    )
+    
+    # 8. Karşılaştırma grafikleri
+    if bulanik_riskler is not None and temel_riskler is not None and metrikler is not None:
+        karsilastirma_grafikleri(
+            bulanik_riskler, temel_riskler, metrikler,
+            kaydet_yolu=os.path.join(cikti_dizini, "08_model_karsilastirma.png")
+        )
+    
+    # 9. Kural aktivasyon diyagramı
+    kural_aktivasyon_diyagrami(
+        fis, guven=0.3, paylasim=35, duygu=0.7, merkezlilik=0.8,
+        kaydet_yolu=os.path.join(cikti_dizini, "09_kural_aktivasyon.png")
+    )
+    
+    print("\n" + "=" * 60)
+    print(f"TÜM GRAFİKLER ÜRETİLDİ: {cikti_dizini}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    from fuzzy_system.inference import BulanikCikarimSistemi
+    
+    fis = BulanikCikarimSistemi('karisik')
+    
+    # Test grafikleri
+    os.makedirs(CIKTI_DIZINI, exist_ok=True)
+    
+    duyarlilik_grafikleri(
+        fis,
+        kaydet_yolu=os.path.join(CIKTI_DIZINI, "test_duyarlilik.png")
+    )
+    
+    giris_cikis_ornekleri(
+        fis,
+        kaydet_yolu=os.path.join(CIKTI_DIZINI, "test_ornekler.png")
+    )
+    
+    print("\n[TEST] Görselleştirme modülü başarıyla çalıştı!")
+# -*- coding: utf-8 -*-
+"""
+Ana Giris Noktasi
+===================
+Sosyal Aglarda Yanlis Bilgi Riskinin Bulanik Mantik ile Modellenmesi
+
+Bu dosya calistirildiginda tum boru hatti otomatik olarak calisir:
+1. Veri seti yuklenir ve olusturulur
+2. Bulanik cikarim sistemi kurulur
+3. Simulasyon calistirilir (1000+ ornek)
+4. Duyarlilik analizi yapilir
+5. Karsilastirma deneyi calistirilir
+6. Tum grafikler uretilir
+7. Sonuclar kaydedilir
+
+Kullanim
+--------
+    python main.py              # Tam pipeline
+    python main.py --sadece-sim # Sadece simulasyon
+    python main.py --sadece-grs # Sadece grafikler
+    streamlit run gui/app.py    # GUI baslat
+"""
+
+import os
+import sys
+import time
+import argparse
+
+# Windows konsol encoding duzeltmesi
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+# Proje kok dizinini Python path'e ekle
+PROJE_DIZINI = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, PROJE_DIZINI)
+
+
+def tam_pipeline_calistir(ornek_sayisi=1000, fonksiyon_tipi='karisik', graf_entegre=True):
+    """
+    Tam veri isleme hattini calistirir.
+    
+    Parametreler
+    ------------
+    ornek_sayisi : int
+        Sentetik veri ornek sayisi.
+    fonksiyon_tipi : str
+        Uyelik fonksiyonu tipi: 'ucgensel', 'yamuksal', 'karisik'
+    graf_entegre : bool
+        Facebook graf verisi kullanilsin mi.
+    """
+    from experiments.simulation import simulasyon_calistir, senaryo_testleri
+    from experiments.sensitivity import duyarlilik_raporu
+    from experiments.comparison import karsilastirma_deneyi_calistir
+    from visualization.plots import tum_grafikleri_uret
+    
+    baslangic = time.time()
+    
+    print("\n")
+    print("+--------------------------------------------------------------+")
+    print("|                                                              |")
+    print("|   Sosyal Aglarda Yanlis Bilgi Riskinin                       |")
+    print("|   Bulanik Mantik ile Modellenmesi                            |")
+    print("|                                                              |")
+    print("|   Mamdani Tipi Bulanik Cikarim Sistemi                       |")
+    print("|                                                              |")
+    print("+--------------------------------------------------------------+")
+    print()
+    
+    # ========================================
+    # ASAMA 1: Simulasyon
+    # ========================================
+    print("\n>> ASAMA 1/4: SIMULASYON")
+    print("-" * 50)
+    df_sonuclar, fis = simulasyon_calistir(
+        ornek_sayisi=ornek_sayisi,
+        fonksiyon_tipi=fonksiyon_tipi,
+        graf_entegre=graf_entegre
+    )
+    
+    # Senaryo testleri
+    print("\n>> SENARYO TESTLERI")
+    print("-" * 50)
+    senaryo_testleri(fis)
+    
+    # ========================================
+    # ASAMA 2: Duyarlilik Analizi
+    # ========================================
+    print("\n>> ASAMA 2/4: DUYARLILIK ANALIZI")
+    print("-" * 50)
+    rapor = duyarlilik_raporu(fis)
+    
+    # ========================================
+    # ASAMA 3: Model Karsilastirmasi
+    # ========================================
+    print("\n>> ASAMA 3/4: MODEL KARSILASTIRMASI")
+    print("-" * 50)
+    karsilastirma = karsilastirma_deneyi_calistir(df=df_sonuclar, fonksiyon_tipi=fonksiyon_tipi)
+    
+    # ========================================
+    # ASAMA 4: Gorsellestirme
+    # ========================================
+    print("\n>> ASAMA 4/4: GORSELLESTIRME")
+    print("-" * 50)
+    tum_grafikleri_uret(
+        fis=fis,
+        risk_degerleri=df_sonuclar['risk_seviyesi'].values,
+        bulanik_riskler=karsilastirma['bulanik_riskler'],
+        temel_riskler=karsilastirma['temel_riskler'],
+        metrikler=karsilastirma['metrikler']
+    )
+    
+    # ========================================
+    # SONUC RAPORU
+    # ========================================
+    toplam_sure = time.time() - baslangic
+    
+    print("\n")
+    print("+--------------------------------------------------------------+")
+    print("|                    CALISMA TAMAMLANDI                        |")
+    print("+--------------------------------------------------------------+")
+    print(f"|  Toplam sure          : {toplam_sure:6.1f} saniye                        |")
+    print(f"|  Ornek sayisi         : {ornek_sayisi:6d}                                |")
+    print(f"|  Uyelik fonksiyonu    : {fonksiyon_tipi:10s}                          |")
+    print(f"|  Kural sayisi         : {len(fis.kurallar):6d}                                |")
+    print("|                                                              |")
+    print("|  Cikti Dosyalari:                                            |")
+    print("|  > data/processed/sentetik_veri.csv                          |")
+    print("|  > data/processed/simulasyon_sonuclari.csv                   |")
+    print("|  > data/processed/karsilastirma_sonuclari.csv                |")
+    print("|  > visualization/output/*.png                                |")
+    print("|                                                              |")
+    print("|  GUI baslatmak icin:                                         |")
+    print("|  > streamlit run gui/app.py                                  |")
+    print("+--------------------------------------------------------------+")
+    print()
+    
+    return {
+        'df_sonuclar': df_sonuclar,
+        'fis': fis,
+        'karsilastirma': karsilastirma,
+        'duyarlilik_raporu': rapor
+    }
+
+
+def sadece_simulasyon(ornek_sayisi=1000, fonksiyon_tipi='karisik', graf_entegre=True):
+    """Sadece simulasyonu calistirir."""
+    from experiments.simulation import simulasyon_calistir, senaryo_testleri
+    df, fis = simulasyon_calistir(ornek_sayisi, fonksiyon_tipi, graf_entegre)
+    senaryo_testleri(fis)
+    return df, fis
+
+
+def sadece_grafikler():
+    """Sadece grafikleri uretir (mevcut verilerden)."""
+    from fuzzy_system.inference import BulanikCikarimSistemi
+    from utils.data_loader import islenmis_veri_yukle
+    from visualization.plots import tum_grafikleri_uret
+    
+    fis = BulanikCikarimSistemi('karisik')
+    
+    try:
+        df = islenmis_veri_yukle("simulasyon_sonuclari.csv")
+        risk_degerleri = df['risk_seviyesi'].values if 'risk_seviyesi' in df.columns else None
+    except FileNotFoundError:
+        risk_degerleri = None
+        df = None
+    
+    tum_grafikleri_uret(fis=fis, risk_degerleri=risk_degerleri)
+
+
+def main():
+    """Ana fonksiyon - komut satiri argumanlarini isler."""
+    parser = argparse.ArgumentParser(
+        description='Sosyal Aglarda Yanlis Bilgi Riskinin Bulanik Mantik ile Modellenmesi',
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument('--ornek-sayisi', type=int, default=1000,
+                       help='Sentetik veri ornek sayisi (varsayilan: 1000)')
+    parser.add_argument('--fonksiyon-tipi', type=str, default='karisik',
+                       choices=['ucgensel', 'yamuksal', 'karisik'],
+                       help='Uyelik fonksiyonu tipi (varsayilan: karisik)')
+    parser.add_argument('--graf-yok', action='store_true',
+                       help='Facebook graf entegrasyonu yapma')
+    parser.add_argument('--sadece-sim', action='store_true',
+                       help='Sadece simulasyonu calistir')
+    parser.add_argument('--sadece-grs', action='store_true',
+                       help='Sadece grafikleri uret')
+    
+    args = parser.parse_args()
+    
+    if args.sadece_sim:
+        sadece_simulasyon(args.ornek_sayisi, args.fonksiyon_tipi, not args.graf_yok)
+    elif args.sadece_grs:
+        sadece_grafikler()
+    else:
+        tam_pipeline_calistir(args.ornek_sayisi, args.fonksiyon_tipi, not args.graf_yok)
+
+
+if __name__ == "__main__":
+    main()
